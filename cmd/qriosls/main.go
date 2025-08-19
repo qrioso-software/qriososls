@@ -9,12 +9,11 @@ import (
 	"os/exec"
 	"path/filepath"
 
-	"github.com/qrioso/qriosls/internal/config"
-	"github.com/qrioso/qriosls/internal/engine"
+	"github.com/qrioso-software/qriososls/internal/config"
+	"github.com/qrioso-software/qriososls/internal/engine"
 	"github.com/spf13/cobra"
 )
 
-//go:embed ../../templates/serverless.example.yml
 var tmplServerless []byte
 
 func main() {
@@ -93,6 +92,7 @@ func main() {
 			engine.Synth(cfg)
 
 			app := fmt.Sprintf("%s-%s", cfg.Service, cfg.Stage)
+			log.Println(app)
 			cmdArgs := []string{"deploy", "--app", filepath.Join(".", "cdk.out")}
 			if awsProfile != "" {
 				cmdArgs = append(cmdArgs, "--profile", awsProfile)

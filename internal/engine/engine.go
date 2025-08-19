@@ -2,9 +2,10 @@ package engine
 
 import (
 	"fmt"
+	"os"
 
-	"github.com/qrioso/qriosls/internal/config"
-	"github.com/qrioso/qriosls/internal/util"
+	"github.com/qrioso-software/qriososls/internal/config"
+	"github.com/qrioso-software/qriososls/internal/util"
 
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsapigateway"
@@ -50,4 +51,16 @@ func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfi
 	}
 
 	return stack
+}
+
+func Synth(cfg *config.ServerlessConfig) {
+	app := awscdk.NewApp(nil)
+
+	stackEnv := &awscdk.Environment{
+		Account: jsii.String(os.Getenv("CDK_DEFAULT_ACCOUNT")),
+		Region:  jsii.String(os.Getenv("CDK_DEFAULT_REGION")),
+	}
+
+	NewStack(app, cfg.Service+"-"+cfg.Stage, cfg, stackEnv)
+	app.Synth(nil)
 }
