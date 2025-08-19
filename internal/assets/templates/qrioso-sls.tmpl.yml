@@ -1,0 +1,28 @@
+service: {{ .Service }}
+stage: {{ .Stage }}
+
+environments:
+  STAGE: {{ .Stage }}
+  REGION: {{ .Region }}
+
+apiGateway:
+  restApiName: restApiExample
+  restApiId: api-${stage}
+  deploymentStageName: dev
+
+functions:
+  example-function:
+    functionName: example-function
+    runtime: provided.al2
+    handler: bootstrap
+    code: ./build/get_example
+    memorySize: 256
+    timeout: 30
+    events:
+      - type: HTTP
+        resource: /get-example
+        path: /
+        method: GET
+    environment:
+      IS_PROD: true
+    

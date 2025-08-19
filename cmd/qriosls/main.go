@@ -4,36 +4,55 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
+	"html/template"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 
+	"github.com/qrioso-software/qriososls/internal/assets"
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/engine"
 	"github.com/spf13/cobra"
 )
 
-var tmplQriosoSls []byte
-
 func main() {
 	var cfgPath string
 	var awsProfile string
 	var requireApproval string
-
 	root := &cobra.Command{
 		Use:   "qriosls",
 		Short: "Qrioso Sls: YAML -> AWS CDK (Go)",
 	}
+	service := "qrioso-serverless"
+	stage := "dev"
+	region := "us-east-1"
 
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "Inicializa un proyecto con QriosoSls.yml",
+		Short: "Inicializa un proyecto con serverless.yml de ejemplo",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := os.Stat("QriosoSls.yml"); err == nil {
-				return fmt.Errorf("ya existe QriosoSls.yml en el directorio")
+			if _, err := os.Stat("qrioso-sls.yml"); err == nil {
+				return fmt.Errorf("ya existe qrioso-sls.yml en el directorio")
 			}
-			if err := os.WriteFile("QriosoSls.yml", tmplQriosoSls, 0644); err != nil {
+
+			file, err := assets.Templates.ReadFile("templates/qrioso-sls.tmpl.yml")
+			if err != nil {
+				return fmt.Errorf("error reading template: %w", err)
+			}
+
+			t := template.Must(template.New("srv").Parse(string(file)))
+			f, err := os.Create("qrioso-sls.yml")
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			data := struct {
+				Service string
+				Stage   string
+				Region  string
+			}{service, stage, region}
+			if err := t.Execute(f, data); err != nil {
 				return err
 			}
 			_ = os.MkdirAll("build", 0755)
@@ -41,6 +60,10 @@ func main() {
 			return nil
 		},
 	}
+
+	initCmd.Flags().StringVar(&service, "service", service, "Nombre del servicio")
+	// initCmd.Flags().StringVar(&stage, "stage", stage, "Stage (dev|stg|prod)")
+	// initCmd.Flags().StringVar(&region, "region", region, "Región AWS (ej. us-east-1)")
 
 	validateCmd := &cobra.Command{
 		Use:   "validate",
