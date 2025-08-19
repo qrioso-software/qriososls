@@ -1,0 +1,23 @@
+service: ridenow-admin-ms
+stage: dev
+
+
+environments:
+  STAGE: dev
+  REGION: us-east-1
+
+functions:
+  get-routes:
+    functionName: ridenow-admin-ms-${stage}-get-routes
+    runtime: provided.al2
+    handler: bootstrap
+    code: ./build/get_routes
+    memorySize: 256
+    timeout: 30
+    events:
+      - type: HTTP
+        resource: /routes
+        path: /
+        method: GET
+    environment:
+      FUNCTION_NAME: get-routes
