@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var tmplServerless []byte
+var tmplQriosoSls []byte
 
 func main() {
 	var cfgPath string
@@ -23,21 +23,21 @@ func main() {
 
 	root := &cobra.Command{
 		Use:   "qriosls",
-		Short: "Qrioso Serverless: YAML -> AWS CDK (Go)",
+		Short: "Qrioso Sls: YAML -> AWS CDK (Go)",
 	}
 
 	initCmd := &cobra.Command{
 		Use:   "init",
-		Short: "Inicializa un proyecto con serverless.yml",
+		Short: "Inicializa un proyecto con QriosoSls.yml",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := os.Stat("serverless.yml"); err == nil {
-				return fmt.Errorf("ya existe serverless.yml en el directorio")
+			if _, err := os.Stat("QriosoSls.yml"); err == nil {
+				return fmt.Errorf("ya existe QriosoSls.yml en el directorio")
 			}
-			if err := os.WriteFile("serverless.yml", tmplServerless, 0644); err != nil {
+			if err := os.WriteFile("QriosoSls.yml", tmplQriosoSls, 0644); err != nil {
 				return err
 			}
 			_ = os.MkdirAll("build", 0755)
-			fmt.Println("✅ Creado serverless.yml y carpeta build/")
+			fmt.Println("✅ Creado QriosoSls.yml y carpeta build/")
 			return nil
 		},
 	}
@@ -53,7 +53,7 @@ func main() {
 			return cfg.Validate()
 		},
 	}
-	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "serverless.yml", "Ruta del YAML")
+	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
 
 	synthCmd := &cobra.Command{
 		Use:   "synth",
@@ -71,7 +71,7 @@ func main() {
 			return nil
 		},
 	}
-	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "serverless.yml", "Ruta del YAML")
+	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
 
 	deployCmd := &cobra.Command{
 		Use:   "deploy",
@@ -109,7 +109,7 @@ func main() {
 			return ex.Run()
 		},
 	}
-	deployCmd.Flags().StringVarP(&cfgPath, "config", "c", "serverless.yml", "Ruta del YAML")
+	deployCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
 	deployCmd.Flags().StringVar(&awsProfile, "profile", "", "AWS profile")
 	deployCmd.Flags().StringVar(&requireApproval, "require-approval", "", "never|any-change|broadening")
 
@@ -135,7 +135,7 @@ func main() {
 			return ex.Run()
 		},
 	}
-	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "serverless.yml", "Ruta del YAML")
+	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
 
 	doctorCmd := &cobra.Command{
 		Use:   "doctor",
