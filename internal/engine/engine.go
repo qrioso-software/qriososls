@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/util"
@@ -17,20 +18,46 @@ import (
 func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfig, env *awscdk.Environment) awscdk.Stack {
 	stack := awscdk.NewStack(scope, &id, &awscdk.StackProps{Env: env})
 
-	// API única por servicio (simple). Se puede permitir múltiples APIs en el futuro.
-	api := awsapigateway.NewRestApi(stack, jsii.String(fmt.Sprintf("%s-api", cfg.Service)), &awsapigateway.RestApiProps{
-		DeployOptions: &awsapigateway.StageOptions{
-			StageName: jsii.String(cfg.Stage),
-		},
-	})
+	// === 1) Resolver API: importar si existe, crear si no
+	var api awsapigateway.IRestApi
+	if cfg.Api != nil && cfg.Api.Id != "" {
+		// Para poder agregar rutas a un API importado, necesitas también el rootResourceId
+		if cfg.Api.RootResourceId == "" {
+			panic("api.rootResourceId es requerido cuando api.id está definido (necesario para api.Root())")
+		}
+		api = awsapigateway.RestApi_FromRestApiAttributes(
+			stack,
+			jsii.String(fmt.Sprintf("%s-imported-api", cfg.Service)),
+			&awsapigateway.RestApiAttributes{
+				RestApiId:      jsii.String(cfg.Api.Id),
+				RootResourceId: jsii.String(cfg.Api.RootResourceId),
+			},
+		)
+	} else {
+		apiName := cfg.Service + "-api"
+		if cfg.Api != nil && cfg.Api.Name != "" {
+			apiName = cfg.Api.Name
+		}
+		api = awsapigateway.NewRestApi(
+			stack,
+			jsii.String(apiName),
+			&awsapigateway.RestApiProps{
+				DeployOptions: &awsapigateway.StageOptions{
+					StageName: jsii.String(cfg.Stage),
+				},
+			},
+		)
+	}
 
+	// === 2) Lambdas y eventos
 	for logicalName, fn := range cfg.Functions {
 		functionName := util.ResolveVars(fn.FunctionName, cfg.Stage)
 		codePath := util.ResolveVars(fn.Code, cfg.Stage)
+		logicalName = strings.ReplaceAll(logicalName, "-", "")
 
 		lambdaFn := awslambda.NewFunction(stack, jsii.String(logicalName), &awslambda.FunctionProps{
 			FunctionName: jsii.String(functionName),
-			Runtime:      awslambda.Runtime_PROVIDED_AL2(),
+			Runtime:      toLambdaRuntime(fn.Runtime),
 			Handler:      jsii.String(fn.Handler),
 			Code:         awslambda.AssetCode_FromAsset(jsii.String(codePath), nil),
 			MemorySize:   jsii.Number(float64(fn.MemorySize)),
@@ -38,14 +65,14 @@ func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfi
 		})
 
 		for _, ev := range fn.Events {
-			switch ev.Type {
+			switch strings.ToUpper(ev.Type) {
 			case "HTTP":
-				res := api.Root().AddResource(jsii.String(ev.Resource), nil)
-				res.AddMethod(jsii.String(ev.Method),
+				// Soporta paths con '/' tipo "/routes" o "/v1/routes"
+				res := addResourceByPath(api, ev.Resource)
+				res.AddMethod(jsii.String(strings.ToUpper(ev.Method)),
 					awsapigateway.NewLambdaIntegration(lambdaFn, nil), nil)
-			// TODO: SQS/S3/EventBridge aquí
 			default:
-				// ignorar o loguear para no romper
+				// TODO: SQS/S3/EventBridge
 			}
 		}
 	}
@@ -53,14 +80,47 @@ func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfi
 	return stack
 }
 
-func Synth(cfg *config.ServerlessConfig) {
-	app := awscdk.NewApp(nil)
+// Crea recursos anidados a partir de "/a/b/c"
+func addResourceByPath(api awsapigateway.IRestApi, resourcePath string) awsapigateway.IResource {
+	curr := api.Root()
+	p := strings.Trim(resourcePath, "/")
+	if p == "" {
+		return curr
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" {
+			continue
+		}
+		curr = curr.AddResource(jsii.String(seg), nil)
+	}
+	return curr
+}
 
-	stackEnv := &awscdk.Environment{
-		Account: jsii.String(os.Getenv("CDK_DEFAULT_ACCOUNT")),
-		Region:  jsii.String(os.Getenv("CDK_DEFAULT_REGION")),
+func Synth(cfg *config.ServerlessConfig, outdir string) error {
+	if outdir == "" {
+		outdir = "cdk.out"
+	}
+
+	app := awscdk.NewApp(&awscdk.AppProps{
+		Outdir: jsii.String(outdir), // 👈 forzar carpeta de salida
+	})
+
+	var stackEnv *awscdk.Environment
+	acct := os.Getenv("CDK_DEFAULT_ACCOUNT")
+	reg := os.Getenv("CDK_DEFAULT_REGION")
+	if acct != "" && reg != "" {
+		stackEnv = &awscdk.Environment{
+			Account: jsii.String(acct),
+			Region:  jsii.String(reg),
+		}
 	}
 
 	NewStack(app, cfg.Service+"-"+cfg.Stage, cfg, stackEnv)
 	app.Synth(nil)
+
+	// sanity check
+	if _, err := os.Stat(outdir); err != nil {
+		return fmt.Errorf("no se encontró %s después de synth: %w", outdir, err)
+	}
+	return nil
 }

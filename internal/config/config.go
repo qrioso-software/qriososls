@@ -6,12 +6,18 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type ApiConfig struct {
+	Id             string `yaml:"id"`
+	RootResourceId string `yaml:"rootResourceId"`
+	Name           string `yaml:"name"`
+}
+
 type ServerlessConfig struct {
 	Service   string                `yaml:"service"`
 	Stage     string                `yaml:"stage"`
+	Api       *ApiConfig            `yaml:"api"` // 👈 nuevo
 	Functions map[string]LambdaFunc `yaml:"functions"`
 }
-
 type LambdaFunc struct {
 	FunctionName string        `yaml:"functionName"`
 	Runtime      string        `yaml:"runtime"`

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 
+	"github.com/aws/jsii-runtime-go"
 	"github.com/qrioso-software/qriososls/internal/assets"
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/engine"
@@ -17,6 +18,7 @@ import (
 )
 
 func main() {
+	defer jsii.Close()
 	var cfgPath string
 	var awsProfile string
 	var requireApproval string
@@ -56,7 +58,7 @@ func main() {
 				return err
 			}
 			_ = os.MkdirAll("build", 0755)
-			fmt.Println("✅ Creado QriosoSls.yml y carpeta build/")
+			log.Println("✅ Creado qrioso-sls.yml y carpeta build/")
 			return nil
 		},
 	}
@@ -76,7 +78,7 @@ func main() {
 			return cfg.Validate()
 		},
 	}
-	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
+	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
 	synthCmd := &cobra.Command{
 		Use:   "synth",
@@ -89,12 +91,12 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg)
-			fmt.Println("✅ Synth listo en cdk.out/")
+			engine.Synth(cfg, "")
+			log.Println("✅ Synth listo en cdk.out/")
 			return nil
 		},
 	}
-	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
+	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
 	deployCmd := &cobra.Command{
 		Use:   "deploy",
@@ -112,7 +114,7 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg)
+			engine.Synth(cfg, "")
 
 			app := fmt.Sprintf("%s-%s", cfg.Service, cfg.Stage)
 			log.Println(app)
@@ -128,11 +130,11 @@ func main() {
 			ex.Stderr = os.Stderr
 			ex.Env = os.Environ()
 
-			fmt.Println("🚀 Ejecutando:", "cdk", cmdArgs)
+			log.Println("🚀 Ejecutando:", "cdk", cmdArgs)
 			return ex.Run()
 		},
 	}
-	deployCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
+	deployCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 	deployCmd.Flags().StringVar(&awsProfile, "profile", "", "AWS profile")
 	deployCmd.Flags().StringVar(&requireApproval, "require-approval", "", "never|any-change|broadening")
 
@@ -150,7 +152,7 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg)
+			engine.Synth(cfg, "")
 
 			ex := exec.Command("cdk", "diff", "--app", filepath.Join(".", "cdk.out"))
 			ex.Stdout = os.Stdout
@@ -158,7 +160,7 @@ func main() {
 			return ex.Run()
 		},
 	}
-	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "QriosoSls.yml", "Ruta del YAML")
+	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
 	doctorCmd := &cobra.Command{
 		Use:   "doctor",
