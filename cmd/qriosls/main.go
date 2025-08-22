@@ -2,13 +2,11 @@ package main
 
 import (
 	"bytes"
-	_ "embed"
 	"fmt"
 	"html/template"
 	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 
 	"github.com/aws/jsii-runtime-go"
 	"github.com/qrioso-software/qriososls/internal/assets"
@@ -19,17 +17,21 @@ import (
 
 func main() {
 	defer jsii.Close()
+
 	var cfgPath string
 	var awsProfile string
 	var requireApproval string
+
 	root := &cobra.Command{
 		Use:   "qriosls",
 		Short: "Qrioso Sls: YAML -> AWS CDK (Go)",
 	}
-	service := "qrioso-serverless"
+
+	service := "qrioso-example"
 	stage := "dev"
 	region := "us-east-1"
 
+	// ===== qriosls init =====
 	initCmd := &cobra.Command{
 		Use:   "init",
 		Short: "Inicializa un proyecto con serverless.yml de ejemplo",
@@ -49,11 +51,13 @@ func main() {
 				return err
 			}
 			defer f.Close()
+
 			data := struct {
 				Service string
 				Stage   string
 				Region  string
 			}{service, stage, region}
+
 			if err := t.Execute(f, data); err != nil {
 				return err
 			}
@@ -62,11 +66,11 @@ func main() {
 			return nil
 		},
 	}
-
 	initCmd.Flags().StringVar(&service, "service", service, "Nombre del servicio")
 	// initCmd.Flags().StringVar(&stage, "stage", stage, "Stage (dev|stg|prod)")
 	// initCmd.Flags().StringVar(&region, "region", region, "Región AWS (ej. us-east-1)")
 
+	// ===== qriosls validate =====
 	validateCmd := &cobra.Command{
 		Use:   "validate",
 		Short: "Valida el archivo de configuración",
@@ -80,9 +84,12 @@ func main() {
 	}
 	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
-	synthCmd := &cobra.Command{
-		Use:   "synth",
-		Short: "Genera cdk.out (Cloud Assembly)",
+	// ===== qriosls cdkapp (oculto) =====
+	// Entry point que el CDK CLI invoca vía CDK_APP.
+	// IMPORTANTE: engine.Synth debe respetar el outdir si viene seteado (CDK_OUTDIR).
+	cdkAppCmd := &cobra.Command{
+		Use:    "cdkapp",
+		Hidden: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(cfgPath)
 			if err != nil {
@@ -91,22 +98,58 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg, "")
+			outdir := os.Getenv("CDK_OUTDIR") // CDK define esta var al invocar el app
+			return engine.Synth(cfg, outdir)
+		},
+	}
+	cdkAppCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
+
+	// ===== qriosls synth =====
+	// Genera Cloud Assembly en ./cdk.out SIN escribir cdk.json
+	synthCmd := &cobra.Command{
+		Use:   "synth",
+		Short: "Genera cdk.out (Cloud Assembly)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Validar config temprano (opcional pero útil para fallar rápido)
+			cfg, err := config.Load(cfgPath)
+			if err != nil {
+				return err
+			}
+			if err := cfg.Validate(); err != nil {
+				return err
+			}
+
+			if _, err := exec.LookPath("cdk"); err != nil {
+				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm install -g aws-cdk")
+			}
+
+			ex := exec.Command("cdk", "synth", "--output", "cdk.out")
+			ex.Env = append(os.Environ(),
+				"CDK_APP=go run ./cmd/qriosls cdkapp --config "+cfgPath,
+			)
+			ex.Stdout = os.Stdout
+			ex.Stderr = os.Stderr
+
+			if err := ex.Run(); err != nil {
+				return fmt.Errorf("error en cdk synth: %w", err)
+			}
 			log.Println("✅ Synth listo en cdk.out/")
 			return nil
 		},
 	}
 	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
+	// ===== qriosls deploy =====
+	// Deja que CDK haga synth+deploy invocando nuestro cdkapp (consistente con synth)
 	deployCmd := &cobra.Command{
 		Use:   "deploy",
 		Short: "Despliega usando CDK CLI",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// require cdk CLI
 			if _, err := exec.LookPath("cdk"); err != nil {
 				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm i -g aws-cdk")
 			}
-			// synth first
+
+			// Validación previa del YAML (opcional)
 			cfg, err := config.Load(cfgPath)
 			if err != nil {
 				return err
@@ -114,21 +157,21 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg, "")
 
-			app := fmt.Sprintf("%s-%s", cfg.Service, cfg.Stage)
-			log.Println(app)
-			cmdArgs := []string{"deploy", "--app", filepath.Join(".", "cdk.out")}
-			if awsProfile != "" {
-				cmdArgs = append(cmdArgs, "--profile", awsProfile)
-			}
+			cmdArgs := []string{"deploy"}
 			if requireApproval != "" {
 				cmdArgs = append(cmdArgs, "--require-approval", requireApproval)
 			}
+			if awsProfile != "" {
+				cmdArgs = append(cmdArgs, "--profile", awsProfile)
+			}
+
 			ex := exec.Command("cdk", cmdArgs...)
+			ex.Env = append(os.Environ(),
+				"CDK_APP=qriosls cdkapp --config "+cfgPath,
+			)
 			ex.Stdout = os.Stdout
 			ex.Stderr = os.Stderr
-			ex.Env = os.Environ()
 
 			log.Println("🚀 Ejecutando:", "cdk", cmdArgs)
 			return ex.Run()
@@ -138,6 +181,7 @@ func main() {
 	deployCmd.Flags().StringVar(&awsProfile, "profile", "", "AWS profile")
 	deployCmd.Flags().StringVar(&requireApproval, "require-approval", "", "never|any-change|broadening")
 
+	// ===== qriosls diff =====
 	diffCmd := &cobra.Command{
 		Use:   "diff",
 		Short: "Diff con CDK CLI",
@@ -145,6 +189,8 @@ func main() {
 			if _, err := exec.LookPath("cdk"); err != nil {
 				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm i -g aws-cdk")
 			}
+
+			// Validación previa del YAML (opcional)
 			cfg, err := config.Load(cfgPath)
 			if err != nil {
 				return err
@@ -152,9 +198,11 @@ func main() {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			engine.Synth(cfg, "")
 
-			ex := exec.Command("cdk", "diff", "--app", filepath.Join(".", "cdk.out"))
+			ex := exec.Command("cdk", "diff")
+			ex.Env = append(os.Environ(),
+				"CDK_APP=qriosls cdkapp --config "+cfgPath,
+			)
 			ex.Stdout = os.Stdout
 			ex.Stderr = os.Stderr
 			return ex.Run()
@@ -162,6 +210,7 @@ func main() {
 	}
 	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
 
+	// ===== qriosls doctor =====
 	doctorCmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Verifica requisitos del entorno",
@@ -176,6 +225,7 @@ func main() {
 			check("node")
 			check("cdk")
 			check("go")
+
 			// prueba credenciales AWS (simple)
 			var out bytes.Buffer
 			ex := exec.Command("aws", "sts", "get-caller-identity")
@@ -188,7 +238,10 @@ func main() {
 		},
 	}
 
-	root.AddCommand(initCmd, validateCmd, synthCmd, deployCmd, diffCmd, doctorCmd)
+	// Registrar comandos
+	root.AddCommand(initCmd, validateCmd, synthCmd, deployCmd, diffCmd, doctorCmd, cdkAppCmd)
+
+	// Ejecutar CLI
 	if err := root.Execute(); err != nil {
 		os.Exit(1)
 	}
