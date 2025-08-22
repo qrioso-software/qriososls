@@ -1,3 +1,4 @@
+//go:generate go doc -all
 package main
 
 import (
@@ -7,242 +8,417 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/aws/jsii-runtime-go"
 	"github.com/qrioso-software/qriososls/internal/assets"
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/engine"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
+// Application constants
+const (
+	defaultConfigPath  = "qrioso-sls.yml" // Default configuration file path
+	defaultServiceName = "qrioso-example" // Default service name
+	defaultStage       = "dev"            // Default deployment stage
+	defaultRegion      = "us-east-1"      // Default AWS region
+	buildDir           = "build"          // Build directory for artifacts
+	cdkOutDir          = "cdk.out"        // CDK output directory for cloud assembly
+)
+
+// App represents the main application structure holding configuration and state
+type App struct {
+	configPath      string // Path to the configuration file
+	awsProfile      string // AWS profile to use for deployment
+	requireApproval string // CDK require-approval setting
+	service         string // Service name for init command
+	stage           string // Stage name for init command
+	region          string // AWS region for init command
+}
+
+// main is the application entry point
+// Initializes jsii runtime and runs the application
 func main() {
 	defer jsii.Close()
 
-	var cfgPath string
-	var awsProfile string
-	var requireApproval string
+	app := &App{}
+	if err := app.Run(); err != nil {
+		log.Printf("Error: %v", err)
+		os.Exit(1)
+	}
+}
 
+// Run initializes and executes the root command
+// Returns: error if command execution fails
+func (a *App) Run() error {
+	rootCmd := a.setupRootCommand()
+	return rootCmd.Execute()
+}
+
+// setupRootCommand configures the main CLI command with all subcommands
+// Returns: *cobra.Command - the configured root command
+func (a *App) setupRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "qriosls",
 		Short: "Qrioso Sls: YAML -> AWS CDK (Go)",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			return a.setupViper()
+		},
 	}
 
-	service := "qrioso-example"
-	stage := "dev"
-	region := "us-east-1"
+	// Global flags available for all commands
+	root.PersistentFlags().StringVarP(&a.configPath, "config", "c", defaultConfigPath, "Configuration file path")
+	root.PersistentFlags().StringVar(&a.awsProfile, "profile", "", "AWS profile name")
+	root.PersistentFlags().StringVar(&a.requireApproval, "require-approval", "", "CDK approval level: never|any-change|broadening")
 
-	// ===== qriosls init =====
-	initCmd := &cobra.Command{
+	// Register all subcommands
+	root.AddCommand(
+		a.initCommand(),
+		a.validateCommand(),
+		a.synthCommand(),
+		a.deployCommand(),
+		a.diffCommand(),
+		a.doctorCommand(),
+		a.cdkAppCommand(),
+	)
+
+	return root
+}
+
+// setupViper configures the Viper configuration manager
+// Returns: error if configuration file exists but cannot be read
+func (a *App) setupViper() error {
+	viper.SetConfigName(strings.TrimSuffix(filepath.Base(a.configPath), filepath.Ext(a.configPath)))
+	viper.SetConfigType("yaml")
+	viper.AddConfigPath(filepath.Dir(a.configPath))
+
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return fmt.Errorf("error reading config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// initCommand creates the 'init' subcommand for project initialization
+// Returns: *cobra.Command - configured init command
+func (a *App) initCommand() *cobra.Command {
+	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Inicializa un proyecto con serverless.yml de ejemplo",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := os.Stat("qrioso-sls.yml"); err == nil {
-				return fmt.Errorf("ya existe qrioso-sls.yml en el directorio")
-			}
-
-			file, err := assets.Templates.ReadFile("templates/qrioso-sls.tmpl.yml")
-			if err != nil {
-				return fmt.Errorf("error reading template: %w", err)
-			}
-
-			t := template.Must(template.New("srv").Parse(string(file)))
-			f, err := os.Create("qrioso-sls.yml")
-			if err != nil {
-				return err
-			}
-			defer f.Close()
-
-			data := struct {
-				Service string
-				Stage   string
-				Region  string
-			}{service, stage, region}
-
-			if err := t.Execute(f, data); err != nil {
-				return err
-			}
-			_ = os.MkdirAll("build", 0755)
-			log.Println("✅ Creado qrioso-sls.yml y carpeta build/")
-			return nil
-		},
+		Short: "Initialize a project with example serverless.yml",
+		RunE:  a.runInit,
 	}
-	initCmd.Flags().StringVar(&service, "service", service, "Nombre del servicio")
-	// initCmd.Flags().StringVar(&stage, "stage", stage, "Stage (dev|stg|prod)")
-	// initCmd.Flags().StringVar(&region, "region", region, "Región AWS (ej. us-east-1)")
 
-	// ===== qriosls validate =====
-	validateCmd := &cobra.Command{
+	cmd.Flags().StringVar(&a.service, "service", defaultServiceName, "Service name")
+	cmd.Flags().StringVar(&a.stage, "stage", defaultStage, "Deployment stage (dev|stg|prod)")
+	cmd.Flags().StringVar(&a.region, "region", defaultRegion, "AWS region")
+
+	return cmd
+}
+
+// runInit executes the init command logic
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if template creation or file operations fail
+// Output: Creates configuration file and build directory
+func (a *App) runInit(cmd *cobra.Command, args []string) error {
+	if _, err := os.Stat(a.configPath); err == nil {
+		return fmt.Errorf("file %s already exists in directory", a.configPath)
+	}
+
+	file, err := assets.Templates.ReadFile("templates/qrioso-sls.tmpl.yml")
+	if err != nil {
+		return fmt.Errorf("error reading template: %w", err)
+	}
+
+	t := template.Must(template.New("srv").Parse(string(file)))
+	f, err := os.Create(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error creating config file: %w", err)
+	}
+	defer f.Close()
+
+	data := struct {
+		Service string
+		Stage   string
+		Region  string
+	}{a.service, a.stage, a.region}
+
+	if err := t.Execute(f, data); err != nil {
+		return fmt.Errorf("error executing template: %w", err)
+	}
+
+	if err := os.MkdirAll(buildDir, 0755); err != nil {
+		return fmt.Errorf("error creating build directory: %w", err)
+	}
+
+	log.Printf("✅ Created %s and directory %s/", a.configPath, buildDir)
+	return nil
+}
+
+// validateCommand creates the 'validate' subcommand for configuration validation
+// Returns: *cobra.Command - configured validate command
+func (a *App) validateCommand() *cobra.Command {
+	return &cobra.Command{
 		Use:   "validate",
-		Short: "Valida el archivo de configuración",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return err
-			}
-			return cfg.Validate()
-		},
+		Short: "Validate the configuration file",
+		RunE:  a.runValidate,
 	}
-	validateCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
+}
 
-	// ===== qriosls cdkapp (oculto) =====
-	// Entry point que el CDK CLI invoca vía CDK_APP.
-	// IMPORTANTE: engine.Synth debe respetar el outdir si viene seteado (CDK_OUTDIR).
-	cdkAppCmd := &cobra.Command{
+// runValidate executes configuration validation
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if configuration is invalid or cannot be loaded
+// Output: Validation success/failure message
+func (a *App) runValidate(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	log.Println("✅ Configuration valid")
+	return nil
+}
+
+// cdkAppCommand creates the hidden 'cdkapp' command used internally by CDK
+// Returns: *cobra.Command - configured cdkapp command
+func (a *App) cdkAppCommand() *cobra.Command {
+	return &cobra.Command{
 		Use:    "cdkapp",
 		Hidden: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return err
-			}
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
-			outdir := os.Getenv("CDK_OUTDIR") // CDK define esta var al invocar el app
-			return engine.Synth(cfg, outdir)
-		},
+		RunE:   a.runCdkApp,
 	}
-	cdkAppCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
+}
 
-	// ===== qriosls synth =====
-	// Genera Cloud Assembly en ./cdk.out SIN escribir cdk.json
-	synthCmd := &cobra.Command{
+// runCdkApp executes the CDK application synthesis
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if configuration validation or synthesis fails
+// Output: Generates cloud assembly in specified output directory
+func (a *App) runCdkApp(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	outdir := os.Getenv("CDK_OUTDIR")
+	return engine.Synth(cfg, outdir)
+}
+
+// synthCommand creates the 'synth' subcommand for CDK synthesis
+// Returns: *cobra.Command - configured synth command
+func (a *App) synthCommand() *cobra.Command {
+	return &cobra.Command{
 		Use:   "synth",
-		Short: "Genera cdk.out (Cloud Assembly)",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Validar config temprano (opcional pero útil para fallar rápido)
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return err
-			}
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
-
-			if _, err := exec.LookPath("cdk"); err != nil {
-				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm install -g aws-cdk")
-			}
-
-			ex := exec.Command("cdk", "synth", "--output", "cdk.out")
-			ex.Env = append(os.Environ(),
-				"CDK_APP=go run ./cmd/qriosls cdkapp --config "+cfgPath,
-			)
-			ex.Stdout = os.Stdout
-			ex.Stderr = os.Stderr
-
-			if err := ex.Run(); err != nil {
-				return fmt.Errorf("error en cdk synth: %w", err)
-			}
-			log.Println("✅ Synth listo en cdk.out/")
-			return nil
-		},
+		Short: "Generate cdk.out (Cloud Assembly)",
+		RunE:  a.runSynth,
 	}
-	synthCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
+}
 
-	// ===== qriosls deploy =====
-	// Deja que CDK haga synth+deploy invocando nuestro cdkapp (consistente con synth)
-	deployCmd := &cobra.Command{
+// runSynth executes CDK synthesis via external CDK CLI
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if CDK CLI not found or synthesis fails
+// Output: Cloud assembly in cdk.out directory
+func (a *App) runSynth(cmd *cobra.Command, args []string) error {
+	if _, err := a.checkCdkInstalled(); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	ex := exec.Command("cdk", "synth", "--output", cdkOutDir)
+	ex.Env = a.prepareCdkEnvironment()
+	ex.Stdout = os.Stdout
+	ex.Stderr = os.Stderr
+
+	if err := ex.Run(); err != nil {
+		return fmt.Errorf("error in cdk synth: %w", err)
+	}
+
+	log.Printf("✅ Synthesis complete in %s/", cdkOutDir)
+	return nil
+}
+
+// deployCommand creates the 'deploy' subcommand for infrastructure deployment
+// Returns: *cobra.Command - configured deploy command
+func (a *App) deployCommand() *cobra.Command {
+	cmd := &cobra.Command{
 		Use:   "deploy",
-		Short: "Despliega usando CDK CLI",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := exec.LookPath("cdk"); err != nil {
-				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm i -g aws-cdk")
-			}
-
-			// Validación previa del YAML (opcional)
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return err
-			}
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
-
-			cmdArgs := []string{"deploy"}
-			if requireApproval != "" {
-				cmdArgs = append(cmdArgs, "--require-approval", requireApproval)
-			}
-			if awsProfile != "" {
-				cmdArgs = append(cmdArgs, "--profile", awsProfile)
-			}
-
-			ex := exec.Command("cdk", cmdArgs...)
-			ex.Env = append(os.Environ(),
-				"CDK_APP=qriosls cdkapp --config "+cfgPath,
-			)
-			ex.Stdout = os.Stdout
-			ex.Stderr = os.Stderr
-
-			log.Println("🚀 Ejecutando:", "cdk", cmdArgs)
-			return ex.Run()
-		},
+		Short: "Deploy using CDK CLI",
+		RunE:  a.runDeploy,
 	}
-	deployCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
-	deployCmd.Flags().StringVar(&awsProfile, "profile", "", "AWS profile")
-	deployCmd.Flags().StringVar(&requireApproval, "require-approval", "", "never|any-change|broadening")
 
-	// ===== qriosls diff =====
-	diffCmd := &cobra.Command{
+	return cmd
+}
+
+// runDeploy executes CDK deployment via external CDK CLI
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if deployment fails or prerequisites not met
+// Output: Deploys AWS infrastructure resources
+func (a *App) runDeploy(cmd *cobra.Command, args []string) error {
+	if _, err := a.checkCdkInstalled(); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	cmdArgs := []string{"deploy"}
+	if a.requireApproval != "" {
+		cmdArgs = append(cmdArgs, "--require-approval", a.requireApproval)
+	}
+	if a.awsProfile != "" {
+		cmdArgs = append(cmdArgs, "--profile", a.awsProfile)
+	}
+
+	ex := exec.Command("cdk", cmdArgs...)
+	ex.Env = a.prepareCdkEnvironment()
+	ex.Stdout = os.Stdout
+	ex.Stderr = os.Stderr
+
+	log.Printf("🚀 Executing: cdk %s", strings.Join(cmdArgs, " "))
+	return ex.Run()
+}
+
+// diffCommand creates the 'diff' subcommand for infrastructure changes comparison
+// Returns: *cobra.Command - configured diff command
+func (a *App) diffCommand() *cobra.Command {
+	return &cobra.Command{
 		Use:   "diff",
-		Short: "Diff con CDK CLI",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if _, err := exec.LookPath("cdk"); err != nil {
-				return fmt.Errorf("cdk CLI no encontrado. Instala con: npm i -g aws-cdk")
-			}
-
-			// Validación previa del YAML (opcional)
-			cfg, err := config.Load(cfgPath)
-			if err != nil {
-				return err
-			}
-			if err := cfg.Validate(); err != nil {
-				return err
-			}
-
-			ex := exec.Command("cdk", "diff")
-			ex.Env = append(os.Environ(),
-				"CDK_APP=qriosls cdkapp --config "+cfgPath,
-			)
-			ex.Stdout = os.Stdout
-			ex.Stderr = os.Stderr
-			return ex.Run()
-		},
+		Short: "Compare changes with CDK CLI",
+		RunE:  a.runDiff,
 	}
-	diffCmd.Flags().StringVarP(&cfgPath, "config", "c", "qrioso-sls.yml", "Ruta del YAML")
+}
 
-	// ===== qriosls doctor =====
-	doctorCmd := &cobra.Command{
+// runDiff executes CDK diff to show infrastructure changes
+// Input: cmd - the command instance, args - command arguments
+// Returns: error if diff execution fails
+// Output: Displays infrastructure changes between current and proposed state
+func (a *App) runDiff(cmd *cobra.Command, args []string) error {
+	if _, err := a.checkCdkInstalled(); err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	ex := exec.Command("cdk", "diff")
+	ex.Env = a.prepareCdkEnvironment()
+	ex.Stdout = os.Stdout
+	ex.Stderr = os.Stderr
+
+	return ex.Run()
+}
+
+// doctorCommand creates the 'doctor' subcommand for environment verification
+// Returns: *cobra.Command - configured doctor command
+func (a *App) doctorCommand() *cobra.Command {
+	return &cobra.Command{
 		Use:   "doctor",
-		Short: "Verifica requisitos del entorno",
-		Run: func(cmd *cobra.Command, args []string) {
-			check := func(bin string) {
-				if _, err := exec.LookPath(bin); err != nil {
-					log.Printf("❌ %s no encontrado", bin)
-				} else {
-					log.Printf("✅ %s OK", bin)
-				}
-			}
-			check("node")
-			check("cdk")
-			check("go")
+		Short: "Verify environment requirements",
+		Run:   a.runDoctor,
+	}
+}
 
-			// prueba credenciales AWS (simple)
-			var out bytes.Buffer
-			ex := exec.Command("aws", "sts", "get-caller-identity")
-			ex.Stdout = &out
-			if err := ex.Run(); err != nil {
-				log.Printf("❌ AWS creds no válidas o AWS CLI no instalado")
-			} else {
-				log.Printf("✅ AWS creds OK: %s", out.String())
-			}
-		},
+// runDoctor checks all required dependencies and environment setup
+// Input: cmd - the command instance, args - command arguments
+// Output: Diagnostic information about required tools and AWS configuration
+func (a *App) runDoctor(cmd *cobra.Command, args []string) {
+	checks := []struct {
+		name  string
+		check func() error
+	}{
+		{"Node.js", a.checkNode},
+		{"CDK CLI", a.checkCdk},
+		{"Go", a.checkGo},
+		{"AWS Credentials", a.checkAwsCredentials},
 	}
 
-	// Registrar comandos
-	root.AddCommand(initCmd, validateCmd, synthCmd, deployCmd, diffCmd, doctorCmd, cdkAppCmd)
-
-	// Ejecutar CLI
-	if err := root.Execute(); err != nil {
-		os.Exit(1)
+	for _, check := range checks {
+		if err := check.check(); err != nil {
+			log.Printf("❌ %s: %v", check.name, err)
+		} else {
+			log.Printf("✅ %s OK", check.name)
+		}
 	}
+}
+
+// HELPER METHODS
+
+// checkCdkInstalled verifies if CDK CLI is available in PATH
+// Returns: (string, error) - path to CDK executable if found, error otherwise
+func (a *App) checkCdkInstalled() (string, error) {
+	return exec.LookPath("cdk")
+}
+
+// prepareCdkEnvironment prepares environment variables for CDK execution
+// Returns: []string - environment variables array with CDK_APP configured
+func (a *App) prepareCdkEnvironment() []string {
+	env := os.Environ()
+	appCommand := fmt.Sprintf("qriosls cdkapp --config %s", a.configPath)
+	return append(env, "CDK_APP="+appCommand)
+}
+
+// checkNode verifies if Node.js is installed and available
+// Returns: error if Node.js is not found in PATH
+func (a *App) checkNode() error {
+	_, err := exec.LookPath("node")
+	return err
+}
+
+// checkCdk verifies if AWS CDK CLI is installed and available
+// Returns: error if CDK is not found in PATH
+func (a *App) checkCdk() error {
+	_, err := exec.LookPath("cdk")
+	return err
+}
+
+// checkGo verifies if Go programming language is installed
+// Returns: error if Go is not found in PATH
+func (a *App) checkGo() error {
+	_, err := exec.LookPath("go")
+	return err
+}
+
+// checkAwsCredentials verifies if AWS credentials are properly configured
+// Returns: error if AWS credentials are invalid or AWS CLI not installed
+func (a *App) checkAwsCredentials() error {
+	var out bytes.Buffer
+	cmd := exec.Command("aws", "sts", "get-caller-identity")
+	cmd.Stdout = &out
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("AWS credentials invalid or AWS CLI not installed")
+	}
+
+	return nil
 }
