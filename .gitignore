@@ -1,3 +1,4 @@
 build
 cdk.out
 qrioso-sls.yml
+dist/
