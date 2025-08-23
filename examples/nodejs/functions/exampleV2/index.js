@@ -1,12 +1,5 @@
-const handler = async (event) => {
-  console.log(event);
-  return {
-    statusCode: 200,
-    body: JSON.stringify({
-      message: 'Hello, World! You have hit the qrioso-serverless API endpoint',
-    }),
-  };
+// index.js (CommonJS)
+exports.handler = async (event) => {
+  console.log("Event:", event);
+  return { statusCode: 200, body: "OK" };
 };
-
-
-export default handler;

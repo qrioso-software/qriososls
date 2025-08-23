@@ -129,17 +129,9 @@ func (lr *LocalRunner) buildFunction(funcName string, function config.LambdaFunc
 	lr.mu.Lock()
 	defer lr.mu.Unlock()
 
-	codePath := filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
-	// codeDir := filepath.Dir(codePath)
-	outputPath := lr.getOutputPath(funcName, function, rt)
+	outputPath := lr.getOutputPath(function, rt)
 
-	log.Println("codePath >>>>>>>>>>>>>>>>>>.", codePath)
-
-	// log.Printf("🔨 Building %s with %s runtime...", funcName, rt.Name())
-	// log.Printf("   Source directory: %s", codeDir)
-	// log.Printf("   Output: %s", outputPath)
-
-	if err := rt.Build(codePath, codePath); err != nil {
+	if err := rt.Build(outputPath, outputPath); err != nil {
 		return fmt.Errorf("build failed for %s: %w", funcName, err)
 	}
 
@@ -148,13 +140,13 @@ func (lr *LocalRunner) buildFunction(funcName string, function config.LambdaFunc
 }
 
 // getOutputPath determina donde debe ir el output basado en el runtime
-func (lr *LocalRunner) getOutputPath(funcName string, function config.LambdaFunc, rt runtime.Runtime) string {
+func (lr *LocalRunner) getOutputPath(function config.LambdaFunc, rt runtime.Runtime) string {
 	codePath := filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
 
 	switch rt.(type) {
 	case *runtime.GolangRuntime:
 		// Para Go, el binario va en el directorio con nombre específico
-		return filepath.Join(filepath.Dir(codePath), "bootstrap")
+		return codePath
 	case *runtime.NodeJSRuntime:
 		// Para Node.js, usar el archivo principal
 		return codePath
