@@ -15,6 +15,7 @@ import (
 	"github.com/qrioso-software/qriososls/internal/assets"
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/engine"
+	"github.com/qrioso-software/qriososls/internal/engine/local"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -418,7 +419,7 @@ func (a *App) runLocal(cmd *cobra.Command, args []string) error {
 	}
 
 	cfg.RootPath = a.RootPath
-	runner, err := engine.NewLocalRunner(cfg)
+	runner, err := local.NewLocalRunner(cfg)
 	if err != nil {
 		return fmt.Errorf("error creating local runner: %w", err)
 	}

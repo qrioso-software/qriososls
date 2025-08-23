@@ -15,7 +15,7 @@ func handler(ctx context.Context, event events.APIGatewayProxyRequest) (events.A
 	return events.APIGatewayProxyResponse{
 		StatusCode: 200,
 		Headers:    map[string]string{"Content-Type": "application/json"},
-		Body:       string(`{"status": "OssKsssss4"}`),
+		Body:       string(`{"status": "SUCESS1"}`),
 	}, nil
 
 }
