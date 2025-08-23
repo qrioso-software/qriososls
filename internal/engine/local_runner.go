@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/qrioso-software/qriososls/internal/config"
@@ -17,10 +19,12 @@ import (
 
 // LocalRunner maneja la ejecución local con hot reload
 type LocalRunner struct {
-	cfg         *config.ServerlessConfig
-	watcher     *fsnotify.Watcher
-	apiProcess  *os.Process
-	lambdaFuncs map[string]*os.Process
+	cfg        *config.ServerlessConfig
+	watcher    *fsnotify.Watcher
+	apiProcess *os.Process
+	stopChan   chan bool
+	lastBuild  time.Time
+	buildMutex sync.Mutex
 }
 
 // NewLocalRunner crea una nueva instancia del ejecutor local
@@ -31,28 +35,31 @@ func NewLocalRunner(cfg *config.ServerlessConfig) (*LocalRunner, error) {
 	}
 
 	return &LocalRunner{
-		cfg:         cfg,
-		watcher:     watcher,
-		lambdaFuncs: make(map[string]*os.Process),
+		cfg:      cfg,
+		watcher:  watcher,
+		stopChan: make(chan bool),
 	}, nil
 }
 
 // Start inicia el entorno local con hot reload
 func (lr *LocalRunner) Start() error {
-	// 1. Iniciar API Gateway local
+	// 1. Compilación inicial de todas las funciones Go
+	if err := lr.buildAllGoFunctions(); err != nil {
+		return err
+	}
+
+	// 2. Iniciar API Gateway local
 	if err := lr.startLocalAPI(); err != nil {
 		return err
 	}
 
-	// 2. Iniciar funciones Lambda localmente
-	if err := lr.startLambdas(); err != nil {
-		return err
-	}
-
-	// 3. Configurar watchers para hot reload
+	// 3. Configurar watchers para recompilación automática
 	if err := lr.setupFileWatchers(); err != nil {
 		return err
 	}
+
+	log.Println("✅ Hot reload enabled! Changes will auto-compile and SAM will reload")
+	log.Println("🌐 API available at: http://localhost:3000")
 
 	// 4. Mantener el proceso activo
 	lr.keepAlive()
@@ -60,235 +67,291 @@ func (lr *LocalRunner) Start() error {
 	return nil
 }
 
+// startLocalAPI inicia SAM CLI para API Gateway local
 func (lr *LocalRunner) startLocalAPI() error {
-	// Usar SAM CLI o localstack para API Gateway local
-	cmd := exec.Command("sam", "local", "start-api",
-		"--template", "cdk.out/local-dev-qrioso-example-dev.template.json",
-		"--port", "3000",
-		// "--env-vars", "env.json",
-	)
+	// Verificar que el template de CDK existe
+	templatePath := "cdk.out/local-dev-qrioso-example-dev.template.json"
+	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
+		return fmt.Errorf("CDK template not found. Run 'qriosls synth' first: %w", err)
+	}
 
+	// Verificar que el archivo env.json existe, si no crearlo
+	envPath := "env.json"
+	if _, err := os.Stat(envPath); os.IsNotExist(err) {
+		if err := lr.createDefaultEnvFile(envPath); err != nil {
+			log.Printf("⚠️ Could not create env.json: %v", err)
+		}
+	}
+
+	// Construir comando SAM
+	cmdArgs := []string{
+		"local", "start-api",
+		"--template", templatePath,
+		"--port", "3000",
+		"--warm-containers", "EAGER",
+	}
+
+	// Agregar env-vars si el archivo existe
+	if _, err := os.Stat(envPath); err == nil {
+		cmdArgs = append(cmdArgs, "--env-vars", envPath)
+	}
+
+	cmd := exec.Command("sam", cmdArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
+	log.Printf("🚀 Starting SAM CLI: sam %s", strings.Join(cmdArgs, " "))
+
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("error starting local API: %w", err)
+		return fmt.Errorf("error starting SAM CLI: %w", err)
 	}
 
 	lr.apiProcess = cmd.Process
 	log.Println("✅ Local API Gateway started on http://localhost:3000")
+
+	// Esperar un poco para que SAM se inicie completamente
+	time.Sleep(2 * time.Second)
+
 	return nil
 }
 
-func (lr *LocalRunner) startLambdas() error {
+// createDefaultEnvFile crea un archivo env.json por defecto
+func (lr *LocalRunner) createDefaultEnvFile(path string) error {
+	envContent := `{
+  "Parameters": {
+    "STAGE": "dev",
+    "REGION": "us-east-1",
+    "IS_PROD": "false"
+  }
+}`
+
+	return os.WriteFile(path, []byte(envContent), 0644)
+}
+
+// buildAllGoFunctions compila todas las funciones Go inicialmente
+func (lr *LocalRunner) buildAllGoFunctions() error {
+	log.Println("🔨 Building Go functions...")
+
 	for funcName, function := range lr.cfg.Functions {
-		if err := lr.startLambdaFunction(funcName, function); err != nil {
-			return err
+		if lr.isGoRuntime(function.Runtime) {
+			if err := lr.buildGoFunction(funcName, function); err != nil {
+				return fmt.Errorf("failed to build %s: %w", funcName, err)
+			}
 		}
 	}
 	return nil
 }
 
-// Modifica la función startLambdaFunction para capturar output de error
-func (lr *LocalRunner) startLambdaFunction(funcName string, function config.LambdaFunc) error {
-	// Para funciones Go
-	if function.Runtime == "provided.al2" || function.Runtime == "go1.x" || strings.Contains(function.Runtime, "go") {
-		// Obtener el path absoluto correcto
-		code := function.Code
-		if !filepath.IsAbs(code) {
-			code = filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
-		}
+// isGoRuntime verifica si el runtime es de Go
+func (lr *LocalRunner) isGoRuntime(runtime string) bool {
+	return runtime == "provided.al2" || runtime == "go1.x" ||
+		strings.Contains(runtime, "go") || strings.Contains(runtime, "provided")
+}
 
-		// El directorio donde están los archivos .go es el directorio del código
-		codeDir := filepath.Dir(code)
+// buildGoFunction compila una función Go específica
+func (lr *LocalRunner) buildGoFunction(funcName string, function config.LambdaFunc) error {
+	lr.buildMutex.Lock()
+	defer lr.buildMutex.Unlock()
 
-		log.Printf("Building Go function in directory: %s", codeDir)
-		log.Printf("Output binary: %s", code)
-
-		// Verificar que el directorio existe y tiene archivos Go
-		if _, err := os.Stat(codeDir); os.IsNotExist(err) {
-			return fmt.Errorf("code directory does not exist: %s", codeDir)
-		}
-
-		goFiles, _ := util.FindGoFilesRecursively(codeDir)
-		if len(goFiles) == 0 {
-			return fmt.Errorf("no Go files found in directory: %s", codeDir)
-		}
-
-		log.Printf("Found %d Go files in directory", len(goFiles))
-
-		// ¡CORRECCIÓN CLAVE! Cambiar el directorio de trabajo para go build
-		println("codeDir", codeDir)
-		buildCmd := exec.Command("go", "build", "-o", fmt.Sprintf("%s/bootstrap", code), code)
-		buildCmd.Dir = codeDir // ← Esto hace que go build se ejecute en el directorio correcto
-		log.Println(buildCmd.String())
-
-		buildCmd.Env = append(os.Environ(),
-			"GOOS=linux",
-			"GOARCH=amd64", // <- sin Graviton
-			"CGO_ENABLED=0",
-		)
-
-		// Capturar output
-		var stdout, stderr bytes.Buffer
-		buildCmd.Stdout = &stdout
-		buildCmd.Stderr = &stderr
-
-		log.Printf("Executing: cd %s && %s", codeDir, strings.Join(buildCmd.Args, " "))
-
-		if err := buildCmd.Run(); err != nil {
-			log.Printf("🚨 Build failed for %s:", funcName)
-			log.Printf("Command: cd %s && %s", codeDir, strings.Join(buildCmd.Args, " "))
-			if stdout.Len() > 0 {
-				log.Printf("stdout: %s", stdout.String())
-			}
-			if stderr.Len() > 0 {
-				log.Printf("stderr: %s", stderr.String())
-			}
-			return fmt.Errorf("error building function %s: %w", funcName, err)
-		}
-
-		if stdout.Len() > 0 {
-			log.Printf("Build output: %s", stdout.String())
-		}
-		log.Printf("✅ Build successful for %s", funcName)
+	// Obtener path absoluto
+	codePath := function.Code
+	if !filepath.IsAbs(codePath) {
+		codePath = filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
 	}
 
-	// Ejecutar función localmente con lambda-local o sam local invoke
-	cmd := exec.Command("sam", "local", "invoke",
-		function.FunctionName,
-		"--template", "template.yaml",
-		"--env-vars", "env.json",
-		"--event", "event.json",
+	codeDir := filepath.Dir(codePath)
+	// binaryName := filepath.Base(codePath)
+	log.Println("codePath..", codePath)
+	log.Printf("🔨 Building %s in %s", funcName, codeDir)
+
+	// Verificar archivos Go
+	goFiles, err := util.FindGoFilesRecursively(codeDir)
+	if err != nil {
+		return fmt.Errorf("error finding Go files: %w", err)
+	}
+	if len(goFiles) == 0 {
+		return fmt.Errorf("no Go files found in %s", codeDir)
+	}
+
+	// log.Println("binaryName..", binaryName)
+	log.Println("codeDir..", codeDir)
+	buildCmd := exec.Command("go", "build",
+		"-o", fmt.Sprintf("%s/bootstrap", codePath), // Output path
+		// "-ldflags", "-s -w", // Strip debug info
+		codePath,
+	)
+	buildCmd.Dir = codeDir
+	buildCmd.Env = append(os.Environ(),
+		"GOOS=linux",
+		"GOARCH=amd64",
+		"CGO_ENABLED=0",
 	)
 
-	// Capturar output de SAM también
-	var samOut, samErr bytes.Buffer
-	cmd.Stdout = &samOut
-	cmd.Stderr = &samErr
+	var stdout, stderr bytes.Buffer
+	buildCmd.Stdout = &stdout
+	buildCmd.Stderr = &stderr
 
-	if err := cmd.Start(); err != nil {
-		log.Printf("SAM stderr: %s", samErr.String())
-		return fmt.Errorf("error starting lambda %s: %w\nSAM output: %s", funcName, err, samErr.String())
+	log.Printf("📦 Compiling: cd %s && %s", codeDir, strings.Join(buildCmd.Args, " "))
+
+	if err := buildCmd.Run(); err != nil {
+		log.Printf("🚨 Build failed for %s:", funcName)
+		log.Printf("STDERR: %s", stderr.String())
+		return fmt.Errorf("build failed: %w", err)
 	}
 
-	lr.lambdaFuncs[funcName] = cmd.Process
-
-	// Mostrar output de SAM
-	if samOut.Len() > 0 {
-		log.Printf("SAM stdout for %s: %s", funcName, samOut.String())
+	if stdout.Len() > 0 {
+		log.Printf("Build output: %s", stdout.String())
 	}
 
-	log.Printf("✅ Lambda function %s started", funcName)
-
+	log.Printf("✅ Built %s → %s", funcName, codePath)
+	lr.lastBuild = time.Now()
 	return nil
 }
 
+// setupFileWatchers configura los watchers con debounce
 func (lr *LocalRunner) setupFileWatchers() error {
-	// Monitorear archivos de código fuente
+	// Monitorear todos los directorios de código Go
 	for _, function := range lr.cfg.Functions {
-		codeDir := filepath.Dir(function.Code)
-		if err := lr.watcher.Add(codeDir); err != nil {
-			return err
+		if lr.isGoRuntime(function.Runtime) {
+			codeDir := filepath.Dir(function.Code)
+			absPath := filepath.Join(lr.cfg.RootPath, codeDir)
+
+			if _, err := os.Stat(absPath); err == nil {
+				if err := lr.watcher.Add(absPath); err != nil {
+					log.Printf("⚠️ Could not watch %s: %v", absPath, err)
+				} else {
+					log.Printf("👀 Watching: %s", absPath)
+				}
+
+				// También monitorear subdirectorios recursivamente
+				lr.watchSubdirectories(absPath)
+			}
 		}
 	}
 
-	// Monitorear cambios y recargar
 	go lr.watchForChanges()
-
 	return nil
 }
 
+// watchSubdirectories añade subdirectorios recursivamente al watcher
+func (lr *LocalRunner) watchSubdirectories(root string) {
+	filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() && !strings.HasPrefix(info.Name(), ".") {
+			if err := lr.watcher.Add(path); err != nil {
+				log.Printf("⚠️ Could not watch subdirectory %s: %v", path, err)
+			}
+		}
+		return nil
+	})
+}
+
+// watchForChanges con debounce inteligente
 func (lr *LocalRunner) watchForChanges() {
+	debounceTimer := time.NewTimer(0)
+	if !debounceTimer.Stop() {
+		<-debounceTimer.C
+	}
+	defer debounceTimer.Stop()
+
+	var changedFunctions []string
+
 	for {
 		select {
 		case event, ok := <-lr.watcher.Events:
 			if !ok {
 				return
 			}
-			if event.Op&fsnotify.Write == fsnotify.Write {
-				lr.handleFileChange(event.Name)
+
+			// Solo procesar cambios en archivos .go
+			if event.Op.Has(fsnotify.Write) && strings.HasSuffix(event.Name, ".go") {
+				// Encontrar qué función fue afectada
+				funcName := lr.findFunctionByPath(event.Name)
+				if funcName != "" && !contains(changedFunctions, funcName) {
+					changedFunctions = append(changedFunctions, funcName)
+				}
+
+				// Reiniciar debounce timer
+				debounceTimer.Reset(800 * time.Millisecond)
 			}
+
+		case <-debounceTimer.C:
+			if len(changedFunctions) > 0 {
+				lr.handleFileChange(changedFunctions)
+				changedFunctions = nil // Reset
+			}
+
 		case err, ok := <-lr.watcher.Errors:
 			if !ok {
 				return
 			}
 			log.Printf("Watcher error: %v", err)
-		}
-	}
-}
 
-func (lr *LocalRunner) handleFileChange(filename string) {
-	log.Printf("🔄 File changed: %s", filename)
-
-	// Encontrar qué función fue afectada
-	for funcName, function := range lr.cfg.Functions {
-		codeDir := filepath.Dir(function.Code)
-		if filepath.Dir(filename) == codeDir {
-			lr.reloadLambdaFunction(funcName, function)
-			break
-		}
-	}
-}
-
-func (lr *LocalRunner) reloadLambdaFunction(funcName string, function config.LambdaFunc) {
-	// Detener proceso actual
-	if proc, exists := lr.lambdaFuncs[funcName]; exists {
-		if err := proc.Kill(); err != nil {
-			log.Printf("Warning: error killing process for %s: %v", funcName, err)
-		}
-	}
-
-	// Recompilar si es necesario con mejor logging
-	if function.Runtime == "provided.al2" || strings.Contains(function.Runtime, "go") {
-		log.Printf("🔨 Rebuilding %s...", funcName)
-
-		buildCmd := exec.Command("go", "build", "-o", function.Code, "./")
-
-		var stdout, stderr bytes.Buffer
-		buildCmd.Stdout = &stdout
-		buildCmd.Stderr = &stderr
-
-		if err := buildCmd.Run(); err != nil {
-			log.Printf("🚨 Rebuild failed for %s:", funcName)
-			if stdout.Len() > 0 {
-				log.Printf("stdout: %s", stdout.String())
-			}
-			if stderr.Len() > 0 {
-				log.Printf("stderr: %s", stderr.String())
-			}
-			log.Printf("Error: %v", err)
+		case <-lr.stopChan:
 			return
 		}
-
-		// Mostrar éxito de recompilación
-		if stdout.Len() > 0 {
-			log.Printf("✅ Rebuild output: %s", stdout.String())
-		}
-		log.Printf("✅ Successfully rebuilt %s", funcName)
-	}
-
-	// Reiniciar función
-	if err := lr.startLambdaFunction(funcName, function); err != nil {
-		log.Printf("Error restarting %s: %v", funcName, err)
-	} else {
-		log.Printf("✅ Successfully restarted %s", funcName)
 	}
 }
 
+// findFunctionByPath encuentra la función basada en la ruta del archivo
+func (lr *LocalRunner) findFunctionByPath(filePath string) string {
+	for funcName, function := range lr.cfg.Functions {
+		if lr.isGoRuntime(function.Runtime) {
+			codeDir := filepath.Dir(function.Code)
+			absCodeDir := filepath.Join(lr.cfg.RootPath, codeDir)
+
+			if strings.HasPrefix(filePath, absCodeDir) {
+				return funcName
+			}
+		}
+	}
+	return ""
+}
+
+// handleFileChange recompila las funciones cambiadas
+func (lr *LocalRunner) handleFileChange(changedFunctions []string) {
+	log.Printf("🔄 Changes detected in: %v", changedFunctions)
+
+	for _, funcName := range changedFunctions {
+		function := lr.cfg.Functions[funcName]
+		if err := lr.buildGoFunction(funcName, function); err != nil {
+			log.Printf("❌ Failed to rebuild %s: %v", funcName, err)
+		} else {
+			log.Printf("✅ Recompiled %s - SAM will auto-reload", funcName)
+		}
+	}
+}
+
+// Helper function
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// keepAlive mantiene el proceso corriendo
 func (lr *LocalRunner) keepAlive() {
-	// Mantener el proceso principal activo
-	select {}
+	// Esperar señal de terminación (Ctrl+C)
+	sigChan := make(chan os.Signal, 1)
+	// signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM) // Descomentar si usas signals
+
+	<-sigChan
+	log.Println("🛑 Shutting down...")
+	lr.Stop()
 }
 
 func (lr *LocalRunner) Stop() {
+	close(lr.stopChan)
 	if lr.apiProcess != nil {
+		log.Println("🛑 Stopping SAM CLI...")
 		lr.apiProcess.Kill()
 	}
-
-	for _, proc := range lr.lambdaFuncs {
-		proc.Kill()
+	if lr.watcher != nil {
+		lr.watcher.Close()
 	}
-
-	lr.watcher.Close()
 }
