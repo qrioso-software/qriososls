@@ -20,6 +20,7 @@ type ServerlessConfig struct {
 	Stage     string                `yaml:"stage"`
 	Api       *ApiConfig            `yaml:"api"`
 	Functions map[string]LambdaFunc `yaml:"functions"`
+	RootPath  string                `yaml:"-"`
 }
 
 type LambdaFunc struct {

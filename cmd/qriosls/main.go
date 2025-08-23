@@ -41,6 +41,7 @@ type App struct {
 	service         string // Service name for init command
 	stage           string // Stage name for init command
 	region          string // AWS region for init command
+	RootPath        string // Root directory of the project
 }
 
 // main is the application entry point
@@ -49,6 +50,14 @@ func main() {
 	defer jsii.Close()
 
 	app := &App{}
+	var err error
+
+	app.RootPath, err = os.Getwd()
+	if err != nil {
+		log.Printf("Error getting project root: %v", err)
+		os.Exit(1)
+	}
+
 	if err := app.Run(); err != nil {
 		log.Printf("Error: %v", err)
 		os.Exit(1)
@@ -88,6 +97,7 @@ func (a *App) setupRootCommand() *cobra.Command {
 		a.doctorCommand(),
 		a.cdkAppCommand(),
 		a.versionCommand(),
+		a.localCommand(),
 	)
 
 	return root
@@ -387,6 +397,34 @@ func (a *App) versionCommand() *cobra.Command {
 			fmt.Printf("qriosls %s (commit %s, built %s)\n", version, commit, date)
 		},
 	}
+}
+
+func (a *App) localCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "local",
+		Short: "Run locally with hot reload",
+		RunE:  a.runLocal,
+	}
+}
+
+func (a *App) runLocal(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load(a.configPath)
+	if err != nil {
+		return fmt.Errorf("error loading config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("config validation failed: %w", err)
+	}
+
+	cfg.RootPath = a.RootPath
+	runner, err := engine.NewLocalRunner(cfg)
+	if err != nil {
+		return fmt.Errorf("error creating local runner: %w", err)
+	}
+
+	defer runner.Stop()
+	return runner.Start()
 }
 
 // HELPER METHODS
