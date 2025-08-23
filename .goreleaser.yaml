@@ -1,0 +1,64 @@
+version: 2
+
+project_name: qriosls
+
+builds:
+  - id: qriosls
+    main: ./cmd/qriosls/main.go
+    binary: qriosls
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.date={{.Date}}
+
+archives:
+  - id: qriosls-archives
+    builds: [qriosls]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums_{{ .Version }}.txt"
+
+# Para 'build' local (no publicar releases)
+release:
+  disable: true
+
+# (Opcional) Homebrew Formula (v2.10 lo depreca pero sigue soportado).
+# Cambiamos 'tap' -> 'repository' y añadimos 'skip_upload: true' para no publicar.
+brews:
+  - name: qriosls
+    repository:
+      owner: qrioso-software
+      name: homebrew-tap
+      branch: main
+    directory: Formula
+    homepage: "https://github.com/qrioso-software/qriososls"
+    description: "Qrioso Serverless CLI (YAML -> AWS CDK Go)"
+    license: MIT
+    install: |
+      bin.install "qriosls"
+    test: |
+      system "#{bin}/qriosls", "version"
+    skip_upload: true
+
+# (Opcional) Scoop (plural 'scoops')
+scoops:
+  - name: qriosls
+    repository:
+      owner: qrioso-software
+      name: scoop-bucket
+      branch: main
+    homepage: "https://github.com/qrioso-software/qriososls"
+    description: "Qrioso Serverless CLI (YAML -> AWS CDK Go)"
+    license: MIT
+    skip_upload: true

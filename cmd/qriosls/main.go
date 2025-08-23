@@ -29,6 +29,10 @@ const (
 	cdkOutDir          = "cdk.out"        // CDK output directory for cloud assembly
 )
 
+var version = "dev"
+var commit = "none"
+var date = "unknown"
+
 // App represents the main application structure holding configuration and state
 type App struct {
 	configPath      string // Path to the configuration file
@@ -83,6 +87,7 @@ func (a *App) setupRootCommand() *cobra.Command {
 		a.diffCommand(),
 		a.doctorCommand(),
 		a.cdkAppCommand(),
+		a.versionCommand(),
 	)
 
 	return root
@@ -369,6 +374,18 @@ func (a *App) runDoctor(cmd *cobra.Command, args []string) {
 		} else {
 			log.Printf("✅ %s OK", check.name)
 		}
+	}
+}
+
+// versionCommand creates the 'version' subcommand for version information
+// Returns: *cobra.Command - configured version command
+func (a *App) versionCommand() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Show version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Printf("qriosls %s (commit %s, built %s)\n", version, commit, date)
+		},
 	}
 }
 
