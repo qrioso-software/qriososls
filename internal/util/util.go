@@ -1,6 +1,10 @@
 package util
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,4 +37,53 @@ func FindGoFilesRecursively(rootDir string) ([]string, error) {
 	}
 
 	return goFiles, nil
+}
+
+func Sha256Hash(input string) string {
+	// Crear un nuevo hash SHA-256
+	hasher := sha256.New()
+
+	// Escribir los bytes de entrada (sin añadir nueva línea como printf '%s')
+	hasher.Write([]byte(input))
+
+	// Obtener el hash resultante
+	hashBytes := hasher.Sum(nil)
+
+	// Convertir a string hexadecimal (equivalente a awk '{print $1}')
+	return hex.EncodeToString(hashBytes)
+}
+
+// copyCompiledFile copia archivos compilados preservando permisos
+func CopyCode(sourcePath, targetDir string) error {
+	fileName := filepath.Base(sourcePath)
+	targetPath := filepath.Join(targetDir, fileName)
+
+	log.Printf("📦 Copiando binario: %s → %s", sourcePath, targetPath)
+
+	// Leer archivo fuente
+	data, err := os.ReadFile(sourcePath)
+	if err != nil {
+		return fmt.Errorf("no se pudo leer binario: %w", err)
+	}
+
+	// Obtener permisos del archivo original
+	sourceInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		return fmt.Errorf("no se pudo obtener permisos: %w", err)
+	}
+
+	// Escribir archivo destino con mismos permisos
+	err = os.WriteFile(targetPath, data, sourceInfo.Mode())
+	if err != nil {
+		return fmt.Errorf("no se pudo escribir binario: %w", err)
+	}
+
+	// Preservar timestamp (opcional pero útil para caching)
+	err = os.Chtimes(targetPath, sourceInfo.ModTime(), sourceInfo.ModTime())
+	if err != nil {
+		log.Printf("⚠️ No se pudo preservar timestamp: %v", err)
+	}
+
+	log.Printf("✅ Binario copiado: %s", targetPath)
+	return nil
 }

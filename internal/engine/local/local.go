@@ -14,88 +14,89 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/qrioso-software/qriososls/internal/config"
 	"github.com/qrioso-software/qriososls/internal/engine/local/runtime"
+	"github.com/qrioso-software/qriososls/internal/util"
 )
 
-// LocalRunner maneja la ejecución local con hot reload
+// LocalRunner handles local execution with hot reload capability
 type LocalRunner struct {
 	cfg              *config.ServerlessConfig
 	watcher          *fsnotify.Watcher
 	apiProcess       *os.Process
-	stopChan         chan bool
+	stopChan         chan struct{}
 	lastBuild        time.Time
 	buildMutex       sync.Mutex
-	mu               sync.Mutex                 // ← NUEVO: Para sincronización general
-	runtimeFactory   *runtime.RuntimeFactory    // ← NUEVO: Factory de runtimes
-	functionRuntimes map[string]runtime.Runtime // ← NUEVO: Mapa de funciones a runtimes
+	mu               sync.Mutex
+	runtimeFactory   *runtime.RuntimeFactory
+	functionRuntimes map[string]runtime.Runtime
+	watchedDirs      map[string]bool // Track watched directories to avoid duplicates
 }
 
-// NewLocalRunner crea una nueva instancia del ejecutor local
+// NewLocalRunner creates a new local runner instance
 func NewLocalRunner(cfg *config.ServerlessConfig) (*LocalRunner, error) {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
 	return &LocalRunner{
 		cfg:              cfg,
 		watcher:          watcher,
-		stopChan:         make(chan bool),
-		runtimeFactory:   runtime.NewRuntimeFactory(),      // ← NUEVO: Inicializar factory
-		functionRuntimes: make(map[string]runtime.Runtime), // ← NUEVO: Inicializar mapa
+		stopChan:         make(chan struct{}),
+		runtimeFactory:   runtime.NewRuntimeFactory(),
+		functionRuntimes: make(map[string]runtime.Runtime),
+		watchedDirs:      make(map[string]bool),
 	}, nil
 }
 
-// Start inicia el entorno local con hot reload
+// Start initializes the local environment with hot reload
 func (lr *LocalRunner) Start() error {
-	// 0. Debug primero
+	// Debug information first
 	lr.debugFunctionInfo()
 
-	// 1. Inicializar runtimes para cada función
+	// Initialize runtimes for each function
 	if err := lr.initializeRuntimes(); err != nil {
 		return err
 	}
 
-	// 2. Build inicial de funciones
+	// Initial build of all functions
 	if err := lr.buildAllFunctions(); err != nil {
 		return err
 	}
 
-	// 3. Iniciar API Gateway local
+	// Start local API Gateway
 	if err := lr.startLocalAPI(); err != nil {
 		return err
 	}
 
-	// 4. Configurar watchers
+	// Setup file watchers
 	if err := lr.setupFileWatchers(); err != nil {
 		return err
 	}
 
 	log.Println("✅ Hot reload enabled for multiple runtimes!")
-	log.Println("🌐 API available at: http://localhost:3000")
 	lr.keepAlive()
 	return nil
 }
 
-// initializeRuntimes crea runtimes para cada función
+// initializeRuntimes creates runtime instances for each function
 func (lr *LocalRunner) initializeRuntimes() error {
 	for funcName, function := range lr.cfg.Functions {
-		// Obtener el directorio de la función
 		codePath := filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
 		functionDir := filepath.Dir(codePath)
 
 		var rt runtime.Runtime
 		var err error
 
-		// Primero intentar usar el runtime de la configuración
+		// Try configured runtime first, fallback to auto-detection
 		if function.Runtime != "" {
 			rt, err = lr.runtimeFactory.GetRuntime(function.Runtime)
 			if err != nil {
-				log.Printf("⚠️ Config runtime '%s' not supported, trying auto-detect: %v", function.Runtime, err)
-				// Fallback a detección automática
+				log.Printf("⚠️ Configured runtime '%s' not supported, trying auto-detect: %v",
+					function.Runtime, err)
 				rt, err = lr.runtimeFactory.GetRuntimeFromFunction(functionDir)
 			}
 		} else {
-			// Detección automática si no hay runtime configurado
+			// Auto-detect runtime if not configured
 			rt, err = lr.runtimeFactory.GetRuntimeFromFunction(functionDir)
 		}
 
@@ -109,7 +110,7 @@ func (lr *LocalRunner) initializeRuntimes() error {
 	return nil
 }
 
-// buildAllFunctions construye todas las funciones
+// buildAllFunctions builds all functions that require compilation
 func (lr *LocalRunner) buildAllFunctions() error {
 	for funcName, function := range lr.cfg.Functions {
 		rt := lr.functionRuntimes[funcName]
@@ -124,7 +125,7 @@ func (lr *LocalRunner) buildAllFunctions() error {
 	return nil
 }
 
-// buildFunction construye una función específica
+// buildFunction builds a specific function
 func (lr *LocalRunner) buildFunction(funcName string, function config.LambdaFunc, rt runtime.Runtime) error {
 	lr.mu.Lock()
 	defer lr.mu.Unlock()
@@ -139,26 +140,23 @@ func (lr *LocalRunner) buildFunction(funcName string, function config.LambdaFunc
 	return nil
 }
 
-// getOutputPath determina donde debe ir el output basado en el runtime
+// getOutputPath determines the output path based on runtime type
 func (lr *LocalRunner) getOutputPath(function config.LambdaFunc, rt runtime.Runtime) string {
 	codePath := filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
 
 	switch rt.(type) {
 	case *runtime.GolangRuntime:
-		// Para Go, el binario va en el directorio con nombre específico
-		return codePath
+		return codePath // Binary goes in function directory
 	case *runtime.NodeJSRuntime:
-		// Para Node.js, usar el archivo principal
-		return codePath
+		return codePath // Main JS file
 	case *runtime.PythonRuntime:
-		// Para Python, usar el directorio completo
-		return filepath.Dir(codePath)
+		return filepath.Dir(codePath) // Entire directory
 	default:
 		return codePath
 	}
 }
 
-// debugFunctionInfo muestra información detallada de debug
+// debugFunctionInfo displays detailed debug information
 func (lr *LocalRunner) debugFunctionInfo() {
 	log.Println("🐛 Debug - Function Configuration:")
 	for funcName, function := range lr.cfg.Functions {
@@ -172,11 +170,10 @@ func (lr *LocalRunner) debugFunctionInfo() {
 		log.Printf("     Absolute path: %s", codePath)
 		log.Printf("     Directory exists: %v", dirExists(functionDir))
 
-		// Mostrar archivos en el directorio
 		if files, err := os.ReadDir(functionDir); err == nil {
 			log.Printf("     Files in directory (%d):", len(files))
 			for i, file := range files {
-				if i < 5 { // Mostrar solo primeros 5 archivos
+				if i < 5 {
 					log.Printf("       - %s (dir: %v)", file.Name(), file.IsDir())
 				}
 			}
@@ -187,22 +184,34 @@ func (lr *LocalRunner) debugFunctionInfo() {
 	}
 }
 
-// setupFileWatchers configura watchers basado en los runtimes
+// setupFileWatchers configures file watchers based on runtime patterns
 func (lr *LocalRunner) setupFileWatchers() error {
+	log.Println("👀 Setting up file watchers...")
+
 	for funcName, function := range lr.cfg.Functions {
 		rt := lr.functionRuntimes[funcName]
-		codeDir := filepath.Dir(filepath.Join(lr.cfg.RootPath, function.Code))
+		completeCodePath := filepath.Join(lr.cfg.RootPath, function.Code)
 
-		// Agregar watchers para los patrones específicos del runtime
+		// Watch the main function directory
+		if err := lr.addWatchedDir(completeCodePath); err != nil {
+			log.Printf("⚠️ Could not watch %s: %v", completeCodePath, err)
+			continue
+		}
+		log.Printf("👀 Watching %s for %s (%s)", completeCodePath, funcName, rt.Name())
+
+		// Add runtime-specific watch patterns
 		for _, pattern := range rt.WatchPatterns() {
-			absPattern := filepath.Join(codeDir, pattern)
-			if matches, _ := filepath.Glob(absPattern); len(matches) > 0 {
-				if err := lr.watcher.Add(codeDir); err != nil {
-					log.Printf("⚠️ Could not watch %s: %v", codeDir, err)
-				} else {
-					log.Printf("👀 Watching %s for %s (%s)", codeDir, funcName, rt.Name())
+			absPattern := filepath.Join(lr.cfg.RootPath, function.Code, pattern)
+			matches, err := filepath.Glob(absPattern)
+			if err != nil {
+				continue
+			}
+
+			for _, match := range matches {
+				matchDir := filepath.Dir(match)
+				if err := lr.addWatchedDir(matchDir); err != nil {
+					log.Printf("⚠️ Could not watch %s: %v", matchDir, err)
 				}
-				break
 			}
 		}
 	}
@@ -211,7 +220,21 @@ func (lr *LocalRunner) setupFileWatchers() error {
 	return nil
 }
 
-// watchForChanges maneja cambios con soporte multi-runtime
+// addWatchedDir adds a directory to watch list avoiding duplicates
+func (lr *LocalRunner) addWatchedDir(dirPath string) error {
+	if lr.watchedDirs[dirPath] {
+		return nil // Already watching
+	}
+
+	if err := lr.watcher.Add(dirPath); err != nil {
+		return err
+	}
+
+	lr.watchedDirs[dirPath] = true
+	return nil
+}
+
+// watchForChanges handles file system changes with debouncing
 func (lr *LocalRunner) watchForChanges() {
 	debounceTimer := time.NewTimer(0)
 	if !debounceTimer.Stop() {
@@ -220,17 +243,32 @@ func (lr *LocalRunner) watchForChanges() {
 	defer debounceTimer.Stop()
 
 	var changedFunctions []string
+	changeSet := make(map[string]bool) // Use set for O(1) lookups
 
 	for {
 		select {
 		case event, ok := <-lr.watcher.Events:
 			if !ok {
+				log.Println("📭 Watcher events channel closed")
 				return
 			}
 
-			// Determinar qué función fue afectada basado en el path
+			// Ignore CHMOD events and temporary files
+			if event.Op == fsnotify.Chmod || lr.shouldIgnoreEvent(event) {
+				continue
+			}
+
+			log.Printf("📁 Event: %s - %s", event.Op, event.Name)
+
+			// Handle file creation events
+			if event.Op&fsnotify.Create == fsnotify.Create {
+				lr.handleFileCreation(event.Name)
+			}
+
+			// Track changed functions for rebuilding
 			if funcName := lr.findFunctionByPath(event.Name); funcName != "" {
-				if !contains(changedFunctions, funcName) {
+				if !changeSet[funcName] {
+					changeSet[funcName] = true
 					changedFunctions = append(changedFunctions, funcName)
 				}
 				debounceTimer.Reset(800 * time.Millisecond)
@@ -240,34 +278,77 @@ func (lr *LocalRunner) watchForChanges() {
 			if len(changedFunctions) > 0 {
 				lr.handleFileChange(changedFunctions)
 				changedFunctions = nil
+				changeSet = make(map[string]bool)
 			}
 
 		case err, ok := <-lr.watcher.Errors:
 			if !ok {
 				return
 			}
-			log.Printf("Watcher error: %v", err)
+			log.Printf("❌ Watcher error: %v", err)
 
 		case <-lr.stopChan:
+			log.Println("🛑 Received stop signal")
 			return
 		}
 	}
 }
 
-// findFunctionByPath encuentra la función basada en la ruta del archivo
+// shouldIgnoreEvent determines if an event should be ignored
+func (lr *LocalRunner) shouldIgnoreEvent(event fsnotify.Event) bool {
+	ignorePatterns := []string{
+		"~$", ".swp", ".tmp", ".log",
+		"/.git/", "/node_modules/", ".idea/",
+	}
+
+	fileName := filepath.Base(event.Name)
+	for _, pattern := range ignorePatterns {
+		if strings.Contains(event.Name, pattern) || strings.HasSuffix(fileName, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleFileCreation handles file creation events
+func (lr *LocalRunner) handleFileCreation(filePath string) {
+	if funcName := lr.findFunctionByPath(filePath); funcName != "" {
+		hash := util.Sha256Hash(funcName)
+		assetDir := fmt.Sprintf("%s/cdk.out/asset.%s", lr.cfg.RootPath, hash)
+
+		if err := util.CopyCode(filePath, assetDir); err != nil {
+			log.Printf("⚠️ Error copying file: %v", err)
+		} else {
+			log.Printf("✅ Copied %s to asset directory", filepath.Base(filePath))
+		}
+	}
+}
+
+// findFunctionByPath finds the function associated with a file path
 func (lr *LocalRunner) findFunctionByPath(filePath string) string {
 	for funcName, function := range lr.cfg.Functions {
 		codeDir := filepath.Dir(function.Code)
 		absCodeDir := filepath.Join(lr.cfg.RootPath, codeDir)
 
-		if strings.HasPrefix(filePath, absCodeDir) {
+		if strings.HasPrefix(filePath, absCodeDir) && !lr.shouldIgnorePath(filePath) {
 			return funcName
 		}
 	}
 	return ""
 }
 
-// handleFileChange maneja cambios para múltiples runtimes
+// shouldIgnorePath checks if a path should be ignored
+func (lr *LocalRunner) shouldIgnorePath(path string) bool {
+	ignoreDirs := []string{".git", "node_modules", "cdk.out", "tmp"}
+	for _, dir := range ignoreDirs {
+		if strings.Contains(path, dir) {
+			return true
+		}
+	}
+	return false
+}
+
+// handleFileChange handles rebuilds for changed functions
 func (lr *LocalRunner) handleFileChange(changedFunctions []string) {
 	log.Printf("🔄 Changes detected in: %v", changedFunctions)
 
@@ -282,53 +363,42 @@ func (lr *LocalRunner) handleFileChange(changedFunctions []string) {
 				log.Printf("✅ Recompiled %s (%s)", funcName, rt.Name())
 			}
 		} else {
-			log.Printf("📦 Runtime %s doesn't need build, SAM will auto-reload", rt.Name())
+			log.Printf("📦 Runtime %s doesn't need build", rt.Name())
 		}
 	}
 }
 
-// Helper function
-func dirExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
-
-// Helper function
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
-}
-
-// keepAlive mantiene el proceso corriendo
+// keepAlive keeps the process running
 func (lr *LocalRunner) keepAlive() {
-	// Esperar señal de terminación (Ctrl+C)
 	<-make(chan struct{})
 }
 
+// Stop gracefully shuts down the local runner
 func (lr *LocalRunner) Stop() {
-	close(lr.stopChan)
+	select {
+	case <-lr.stopChan:
+		// Already closed
+	default:
+		close(lr.stopChan)
+	}
+
 	if lr.apiProcess != nil {
 		log.Println("🛑 Stopping SAM CLI...")
 		lr.apiProcess.Kill()
 	}
+
 	if lr.watcher != nil {
 		lr.watcher.Close()
 	}
 }
 
-// startLocalAPI inicia SAM CLI para API Gateway local
+// startLocalAPI starts the local API Gateway using SAM CLI
 func (lr *LocalRunner) startLocalAPI() error {
-	// Verificar que el template de CDK existe
 	templatePath := "cdk.out/local-dev-qrioso-example-dev.template.json"
 	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
 		return fmt.Errorf("CDK template not found. Run 'qriosls synth' first: %w", err)
 	}
 
-	// Verificar que el archivo env.json existe, si no crearlo
 	envPath := "env.json"
 	if _, err := os.Stat(envPath); os.IsNotExist(err) {
 		if err := lr.createDefaultEnvFile(envPath); err != nil {
@@ -336,7 +406,6 @@ func (lr *LocalRunner) startLocalAPI() error {
 		}
 	}
 
-	// Construir comando SAM
 	cmdArgs := []string{
 		"local", "start-api",
 		"--template", templatePath,
@@ -344,7 +413,6 @@ func (lr *LocalRunner) startLocalAPI() error {
 		"--warm-containers", "EAGER",
 	}
 
-	// Agregar env-vars si el archivo existe
 	if _, err := os.Stat(envPath); err == nil {
 		cmdArgs = append(cmdArgs, "--env-vars", envPath)
 	}
@@ -362,13 +430,11 @@ func (lr *LocalRunner) startLocalAPI() error {
 	lr.apiProcess = cmd.Process
 	log.Println("✅ Local API Gateway started on http://localhost:3000")
 
-	// Esperar un poco para que SAM se inicie completamente
 	time.Sleep(2 * time.Second)
-
 	return nil
 }
 
-// createDefaultEnvFile crea un archivo env.json por defecto
+// createDefaultEnvFile creates a default environment file
 func (lr *LocalRunner) createDefaultEnvFile(path string) error {
 	envContent := `{
   "Parameters": {
@@ -377,6 +443,20 @@ func (lr *LocalRunner) createDefaultEnvFile(path string) error {
     "IS_PROD": "false"
   }
 }`
-
 	return os.WriteFile(path, []byte(envContent), 0644)
+}
+
+// Helper functions
+func dirExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
 }

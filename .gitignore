@@ -2,3 +2,6 @@ build
 cdk.out
 qrioso-sls.yml
 dist/
+examples/build
+examples/cdk.out
+examples/golang/get_example/bootstrap

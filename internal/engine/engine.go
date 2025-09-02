@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-cdk-go/awscdk/v2"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awsapigateway"
 	"github.com/aws/aws-cdk-go/awscdk/v2/awslambda"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awss3assets"
 	"github.com/aws/constructs-go/constructs/v10"
 	"github.com/aws/jsii-runtime-go"
 )
@@ -185,7 +186,6 @@ func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfi
 }
 
 func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.ServerlessConfig, env *awscdk.Environment) constructs.Construct {
-
 	api := awsapigateway.NewRestApi(scope, jsii.String(cfg.Service+"-local-api"), &awsapigateway.RestApiProps{
 		RestApiName: jsii.String(cfg.Service + "-local-api"),
 		DeployOptions: &awsapigateway.StageOptions{
@@ -207,10 +207,16 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 			FunctionName: jsii.String(functionName),
 			Runtime:      toLambdaRuntime(fn.Runtime),
 			Handler:      jsii.String(fn.Handler),
-			Code:         awslambda.Code_FromAsset(jsii.String(codePath), nil),
-			MemorySize:   jsii.Number(float64(fn.MemorySize)),
-			Timeout:      awscdk.Duration_Seconds(jsii.Number(float64(fn.Timeout))),
+			Code: awslambda.Code_FromAsset(jsii.String(codePath), &awss3assets.AssetOptions{
+				AssetHashType: awscdk.AssetHashType_CUSTOM,
+				AssetHash:     jsii.String(functionName),
+			}),
+			MemorySize: jsii.Number(float64(fn.MemorySize)),
+			Timeout:    awscdk.Duration_Seconds(jsii.Number(float64(fn.Timeout))),
 		})
+
+		cfn := lambdaFn.Node().DefaultChild().(awscdk.CfnResource)
+		cfn.OverrideLogicalId(jsii.String(functionName))
 
 		for _, ev := range fn.Events {
 			if strings.ToUpper(ev.Type) != "HTTP" {
@@ -227,7 +233,6 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 			// Path params requeridos (REST v1)
 			params := extractPathParams(fullPath)
 			reqParams := requiredPathParamsMap(params)
-			// res.
 
 			finalRes.AddMethod(
 				jsii.String(ev.Method),
@@ -238,7 +243,6 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 					RequestParameters: reqParams, // solo si hay {param}
 				},
 			)
-			log.Printf("Agregando endpoint %s %s%s", ev.Method, ev.Resource, ev.Path)
 		}
 	}
 
@@ -283,7 +287,10 @@ func Synth(cfg *config.ServerlessConfig, outdir string) error {
 	stack := awscdk.NewStack(app, jsii.String("local-dev-"+cfg.Service+"-"+cfg.Stage), &awscdk.StackProps{
 		Env: stackEnv,
 	})
+
 	NewLocalDevStack(stack, cfg.Service+"-"+cfg.Stage, cfg, stackEnv)
+	// mm := sco.Node().Metadata()
+	// log.Println("metadata <><><>", mm)
 	app.Synth(nil)
 
 	// sanity check
