@@ -144,10 +144,14 @@ func NewStack(scope constructs.Construct, id string, cfg *config.ServerlessConfi
 		functionName := util.ResolveVars(fn.FunctionName, cfg.Stage)
 		codePath := util.ResolveVars(fn.Code, cfg.Stage)
 		logicalName = strings.ReplaceAll(logicalName, "-", "")
-		log.Println("codePath", codePath)
+		runtime := toLambdaRuntime(fn.Runtime)
+		if runtime == nil {
+			log.Printf("⚠️ No se encontró un runtime para %s", fn.Runtime)
+			continue
+		}
 		lambdaFn := awslambda.NewFunction(stack, jsii.String(logicalName), &awslambda.FunctionProps{
 			FunctionName: jsii.String(functionName),
-			Runtime:      toLambdaRuntime(fn.Runtime),
+			Runtime:      runtime,
 			Handler:      jsii.String(fn.Handler),
 			Code:         awslambda.AssetCode_FromAsset(jsii.String(codePath), nil),
 			MemorySize:   jsii.Number(float64(fn.MemorySize)),
@@ -191,7 +195,6 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 		DeployOptions: &awsapigateway.StageOptions{
 			StageName: jsii.String("local"),
 		},
-		// 👇 Agregar esto para desarrollo local
 	})
 
 	// Cache de recursos creados para reutilizarlos entre rutas
@@ -202,10 +205,17 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 		functionName := util.ResolveVars(fn.FunctionName, cfg.Stage)
 		codePath := util.ResolveVars(fn.Code, cfg.Stage)
 		logicalName = strings.ReplaceAll(logicalName, "-", "")
+		runtime := toLambdaRuntime(fn.Runtime)
+		log.Println("logicalName", logicalName)
+		log.Println("runtime", runtime)
+		if runtime == nil {
+			log.Printf("⚠️ No se encontró un runtime para %s", fn.Runtime)
+			continue
+		}
 
 		lambdaFn := awslambda.NewFunction(scope, jsii.String(logicalName), &awslambda.FunctionProps{
 			FunctionName: jsii.String(functionName),
-			Runtime:      toLambdaRuntime(fn.Runtime),
+			Runtime:      runtime,
 			Handler:      jsii.String(fn.Handler),
 			Code: awslambda.Code_FromAsset(jsii.String(codePath), &awss3assets.AssetOptions{
 				AssetHashType: awscdk.AssetHashType_CUSTOM,
@@ -249,7 +259,6 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 	return scope
 }
 
-// Crea recursos anidados a partir de "/a/b/c"
 func addResourceByPath(api awsapigateway.IRestApi, resourcePath string) awsapigateway.IResource {
 	curr := api.Root()
 	p := strings.Trim(resourcePath, "/")
@@ -289,8 +298,7 @@ func Synth(cfg *config.ServerlessConfig, outdir string) error {
 	})
 
 	NewLocalDevStack(stack, cfg.Service+"-"+cfg.Stage, cfg, stackEnv)
-	// mm := sco.Node().Metadata()
-	// log.Println("metadata <><><>", mm)
+
 	app.Synth(nil)
 
 	// sanity check

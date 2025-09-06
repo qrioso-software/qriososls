@@ -17,10 +17,16 @@ func toLambdaRuntime(s string) awslambda.Runtime {
 		return awslambda.Runtime_NODEJS_20_X()
 	case "nodejs18.x", "nodejs18x", "nodejs18":
 		return awslambda.Runtime_NODEJS_18_X()
+	case "python3.10", "python310":
+		return awslambda.Runtime_PYTHON_3_10()
 	case "python3.12", "python312":
 		return awslambda.Runtime_PYTHON_3_12()
 	case "python3.11", "python311":
 		return awslambda.Runtime_PYTHON_3_11()
+	case "python3.9", "python39":
+		return awslambda.Runtime_PYTHON_3_9()
+	case "python3.8", "python38":
+		return awslambda.Runtime_PYTHON_3_8()
 	// case "go1.x", "go1x", "go":
 	// 	return awslambda.Runtime_GO_1_X()
 	case "java17":

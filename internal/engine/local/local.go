@@ -50,6 +50,12 @@ func NewLocalRunner(cfg *config.ServerlessConfig) (*LocalRunner, error) {
 
 // Start initializes the local environment with hot reload
 func (lr *LocalRunner) Start() error {
+
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println("Error in local runner", err)
+		}
+	}()
 	// Debug information first
 	lr.debugFunctionInfo()
 

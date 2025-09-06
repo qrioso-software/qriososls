@@ -48,6 +48,13 @@ type App struct {
 // main is the application entry point
 // Initializes jsii runtime and runs the application
 func main() {
+
+	defer func() {
+		if err := recover(); err != nil {
+			log.Println("Error in qriosls", err)
+		}
+	}()
+
 	defer jsii.Close()
 
 	app := &App{}
