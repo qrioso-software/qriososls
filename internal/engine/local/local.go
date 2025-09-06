@@ -261,7 +261,7 @@ func (lr *LocalRunner) watchForChanges() {
 			log.Printf("📁 Event: %s - %s", event.Op, event.Name)
 
 			// Handle file creation events
-			if event.Op&fsnotify.Create == fsnotify.Create {
+			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
 				lr.handleFileCreation(event.Name)
 			}
 
@@ -312,10 +312,12 @@ func (lr *LocalRunner) shouldIgnoreEvent(event fsnotify.Event) bool {
 
 // handleFileCreation handles file creation events
 func (lr *LocalRunner) handleFileCreation(filePath string) {
+	log.Println("handleFileCreation...")
 	if funcName := lr.findFunctionByPath(filePath); funcName != "" {
+		log.Println("📁 File created:", filePath)
 		hash := util.Sha256Hash(funcName)
 		assetDir := fmt.Sprintf("%s/cdk.out/asset.%s", lr.cfg.RootPath, hash)
-
+		log.Println("📁 Asset directory:", assetDir)
 		if err := util.CopyCode(filePath, assetDir); err != nil {
 			log.Printf("⚠️ Error copying file: %v", err)
 		} else {
@@ -450,13 +452,4 @@ func (lr *LocalRunner) createDefaultEnvFile(path string) error {
 func dirExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
-		}
-	}
-	return false
 }
