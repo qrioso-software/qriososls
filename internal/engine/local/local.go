@@ -57,7 +57,7 @@ func (lr *LocalRunner) Start() error {
 		}
 	}()
 	// Debug information first
-	lr.debugFunctionInfo()
+	// lr.debugFunctionInfo()
 
 	// Initialize runtimes for each function
 	if err := lr.initializeRuntimes(); err != nil {
@@ -79,7 +79,7 @@ func (lr *LocalRunner) Start() error {
 		return err
 	}
 
-	log.Println("✅ Hot reload enabled for multiple runtimes!")
+	// log.Println("✅ Hot reload enabled for multiple runtimes!")
 	lr.keepAlive()
 	return nil
 }
@@ -164,7 +164,6 @@ func (lr *LocalRunner) getOutputPath(function config.LambdaFunc, rt runtime.Runt
 
 // debugFunctionInfo displays detailed debug information
 func (lr *LocalRunner) debugFunctionInfo() {
-	log.Println("🐛 Debug - Function Configuration:")
 	for funcName, function := range lr.cfg.Functions {
 		codePath := filepath.Join(lr.cfg.RootPath, filepath.Clean(function.Code))
 		functionDir := filepath.Dir(codePath)
@@ -192,7 +191,6 @@ func (lr *LocalRunner) debugFunctionInfo() {
 
 // setupFileWatchers configures file watchers based on runtime patterns
 func (lr *LocalRunner) setupFileWatchers() error {
-	log.Println("👀 Setting up file watchers...")
 
 	for funcName, function := range lr.cfg.Functions {
 		rt := lr.functionRuntimes[funcName]
@@ -200,11 +198,8 @@ func (lr *LocalRunner) setupFileWatchers() error {
 
 		// Watch the main function directory
 		if err := lr.addWatchedDir(completeCodePath); err != nil {
-			log.Printf("⚠️ Could not watch %s: %v", completeCodePath, err)
 			continue
 		}
-		log.Printf("👀 Watching %s for %s (%s)", completeCodePath, funcName, rt.Name())
-
 		// Add runtime-specific watch patterns
 		for _, pattern := range rt.WatchPatterns() {
 			absPattern := filepath.Join(lr.cfg.RootPath, function.Code, pattern)
@@ -243,9 +238,11 @@ func (lr *LocalRunner) addWatchedDir(dirPath string) error {
 // watchForChanges handles file system changes with debouncing
 func (lr *LocalRunner) watchForChanges() {
 	debounceTimer := time.NewTimer(0)
+
 	if !debounceTimer.Stop() {
 		<-debounceTimer.C
 	}
+
 	defer debounceTimer.Stop()
 
 	var changedFunctions []string
@@ -255,7 +252,6 @@ func (lr *LocalRunner) watchForChanges() {
 		select {
 		case event, ok := <-lr.watcher.Events:
 			if !ok {
-				log.Println("📭 Watcher events channel closed")
 				return
 			}
 
@@ -263,8 +259,6 @@ func (lr *LocalRunner) watchForChanges() {
 			if event.Op == fsnotify.Chmod || lr.shouldIgnoreEvent(event) {
 				continue
 			}
-
-			log.Printf("📁 Event: %s - %s", event.Op, event.Name)
 
 			// Handle file creation events
 			if event.Op&fsnotify.Create == fsnotify.Create || event.Op&fsnotify.Write == fsnotify.Write {
@@ -318,16 +312,12 @@ func (lr *LocalRunner) shouldIgnoreEvent(event fsnotify.Event) bool {
 
 // handleFileCreation handles file creation events
 func (lr *LocalRunner) handleFileCreation(filePath string) {
-	log.Println("handleFileCreation...")
+
 	if funcName := lr.findFunctionByPath(filePath); funcName != "" {
-		log.Println("📁 File created:", filePath)
 		hash := util.Sha256Hash(funcName)
 		assetDir := fmt.Sprintf("%s/cdk.out/asset.%s", lr.cfg.RootPath, hash)
-		log.Println("📁 Asset directory:", assetDir)
 		if err := util.CopyCode(filePath, assetDir); err != nil {
 			log.Printf("⚠️ Error copying file: %v", err)
-		} else {
-			log.Printf("✅ Copied %s to asset directory", filepath.Base(filePath))
 		}
 	}
 }
@@ -358,8 +348,6 @@ func (lr *LocalRunner) shouldIgnorePath(path string) bool {
 
 // handleFileChange handles rebuilds for changed functions
 func (lr *LocalRunner) handleFileChange(changedFunctions []string) {
-	log.Printf("🔄 Changes detected in: %v", changedFunctions)
-
 	for _, funcName := range changedFunctions {
 		function := lr.cfg.Functions[funcName]
 		rt := lr.functionRuntimes[funcName]
@@ -367,11 +355,7 @@ func (lr *LocalRunner) handleFileChange(changedFunctions []string) {
 		if rt.NeedsBuild() {
 			if err := lr.buildFunction(funcName, function, rt); err != nil {
 				log.Printf("❌ Failed to rebuild %s: %v", funcName, err)
-			} else {
-				log.Printf("✅ Recompiled %s (%s)", funcName, rt.Name())
 			}
-		} else {
-			log.Printf("📦 Runtime %s doesn't need build", rt.Name())
 		}
 	}
 }

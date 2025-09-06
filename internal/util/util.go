@@ -58,8 +58,6 @@ func CopyCode(sourcePath, targetDir string) error {
 	fileName := filepath.Base(sourcePath)
 	targetPath := filepath.Join(targetDir, fileName)
 
-	log.Printf("📦 Copiando binario: %s → %s", sourcePath, targetPath)
-
 	// Leer archivo fuente
 	data, err := os.ReadFile(sourcePath)
 	if err != nil {
@@ -84,6 +82,5 @@ func CopyCode(sourcePath, targetDir string) error {
 		log.Printf("⚠️ No se pudo preservar timestamp: %v", err)
 	}
 
-	log.Printf("✅ Binario copiado: %s", targetPath)
 	return nil
 }
