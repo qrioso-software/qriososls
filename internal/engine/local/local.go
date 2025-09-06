@@ -402,7 +402,8 @@ func (lr *LocalRunner) Stop() {
 
 // startLocalAPI starts the local API Gateway using SAM CLI
 func (lr *LocalRunner) startLocalAPI() error {
-	templatePath := "cdk.out/local-dev-qrioso-example-dev.template.json"
+
+	templatePath := fmt.Sprintf("cdk.out/%s-%s.template.json", lr.cfg.Service, lr.cfg.Stage)
 	if _, err := os.Stat(templatePath); os.IsNotExist(err) {
 		return fmt.Errorf("CDK template not found. Run 'qriosls synth' first: %w", err)
 	}
@@ -418,7 +419,8 @@ func (lr *LocalRunner) startLocalAPI() error {
 		"local", "start-api",
 		"--template", templatePath,
 		"--port", "3000",
-		"--warm-containers", "EAGER",
+		"--warm-containers", "LAZY",
+		"--skip-pull-image",
 	}
 
 	if _, err := os.Stat(envPath); err == nil {
@@ -436,7 +438,6 @@ func (lr *LocalRunner) startLocalAPI() error {
 	}
 
 	lr.apiProcess = cmd.Process
-	log.Println("✅ Local API Gateway started on http://localhost:3000")
 
 	time.Sleep(2 * time.Second)
 	return nil
@@ -447,10 +448,10 @@ func (lr *LocalRunner) createDefaultEnvFile(path string) error {
 	envContent := `{
   "Parameters": {
     "STAGE": "dev",
-    "REGION": "us-east-1",
-    "IS_PROD": "false"
-  }
-}`
+		"REGION": "us-east-1",
+		"IS_PROD": "false"
+	}
+  }`
 	return os.WriteFile(path, []byte(envContent), 0644)
 }
 

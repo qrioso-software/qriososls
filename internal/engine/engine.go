@@ -206,8 +206,7 @@ func NewLocalDevStack(scope constructs.Construct, id string, cfg *config.Serverl
 		codePath := util.ResolveVars(fn.Code, cfg.Stage)
 		logicalName = strings.ReplaceAll(logicalName, "-", "")
 		runtime := toLambdaRuntime(fn.Runtime)
-		log.Println("logicalName", logicalName)
-		log.Println("runtime", runtime)
+
 		if runtime == nil {
 			log.Printf("⚠️ No se encontró un runtime para %s", fn.Runtime)
 			continue
@@ -275,12 +274,11 @@ func addResourceByPath(api awsapigateway.IRestApi, resourcePath string) awsapiga
 }
 
 func Synth(cfg *config.ServerlessConfig, outdir string) error {
-	if outdir == "" {
-		outdir = "cdk.out"
-	}
 
 	app := awscdk.NewApp(&awscdk.AppProps{
-		Outdir: jsii.String(outdir),
+		AutoSynth:               jsii.Bool(true),
+		DefaultStackSynthesizer: awscdk.NewLegacyStackSynthesizer(),
+		Outdir:                  jsii.String("cdk.out"),
 	})
 
 	var stackEnv *awscdk.Environment
@@ -293,7 +291,7 @@ func Synth(cfg *config.ServerlessConfig, outdir string) error {
 		}
 	}
 
-	stack := awscdk.NewStack(app, jsii.String("local-dev-"+cfg.Service+"-"+cfg.Stage), &awscdk.StackProps{
+	stack := awscdk.NewStack(app, jsii.String(cfg.Service+"-"+cfg.Stage), &awscdk.StackProps{
 		Env: stackEnv,
 	})
 
